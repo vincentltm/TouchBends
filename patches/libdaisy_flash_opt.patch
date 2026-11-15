@@ -1,0 +1,264 @@
+diff --git a/Makefile b/Makefile
+index 5253e570..5aecb110 100644
+--- a/Makefile
++++ b/Makefile
+@@ -74,7 +74,7 @@ util/WaveTableLoader \
+ # building variables
+ ######################################
+ DEBUG = 0
+-OPT = -O3
++OPT ?= -Os -flto
+ 
+ #######################################
+ # paths
+@@ -254,7 +254,7 @@ CXX = $(GCC_PATH)/$(PREFIX)g++
+ AS = $(GCC_PATH)/$(PREFIX)gcc -x assembler-with-cpp
+ CP = $(GCC_PATH)/$(PREFIX)objcopy
+ SZ = $(GCC_PATH)/$(PREFIX)size
+-AR = $(GCC_PATH)/$(PREFIX)ar
++AR = $(GCC_PATH)/$(PREFIX)gcc-ar
+ GDB = $(GCC_PATH)/$(PREFIX)gdb
+ else
+ CC = $(PREFIX)gcc
+@@ -262,7 +262,7 @@ CXX = $(PREFIX)g++
+ AS = $(PREFIX)gcc -x assembler-with-cpp
+ CP = $(PREFIX)objcopy
+ SZ = $(PREFIX)size
+-AR = $(PREFIX)ar
++AR = $(PREFIX)gcc-ar
+ GDB = $(PREFIX)gdb
+ endif
+ HEX = $(CP) -O ihex
+@@ -302,6 +302,7 @@ C_DEFS =  \
+ 
+ # File I/O Abstract Interface for FatFS:
+ C_DEFS += -DFILEIO_ENABLE_FATFS_READER
++C_DEFS += -DDAISY_NO_USB_HOST
+ 
+ C_INCLUDES = \
+ -I$(MODULE_DIR) \
+diff --git a/src/hid/usb_midi.cpp b/src/hid/usb_midi.cpp
+index 539d0ff5..3c3bb780 100644
+--- a/src/hid/usb_midi.cpp
++++ b/src/hid/usb_midi.cpp
+@@ -4,12 +4,16 @@
+ #include "hid/usb_midi.h"
+ #include <cassert>
+ 
++#define DAISY_NO_USB_HOST 1
++
++#ifndef DAISY_NO_USB_HOST
+ extern "C"
+ {
+     extern USBH_HandleTypeDef hUsbHostHS;
+ }
+ 
+ #define pUSB_Host &hUsbHostHS
++#endif
+ 
+ using namespace daisy;
+ 
+@@ -106,12 +110,14 @@ void MidiUsbTransport::Impl::Init(Config config)
+     config_    = config;
+     rx_active_ = false;
+ 
++#ifndef DAISY_NO_USB_HOST
+     if(config_.periph == Config::HOST)
+     {
+         System::Delay(10);
+         USBH_MIDI_SetReceiveCallback(pUSB_Host, HostReceiveCallback, nullptr);
+     }
+     else
++#endif
+     {
+         // This tells the USB middleware to send out MIDI descriptors instead of CDC
+         usbd_mode = USBD_MODE_MIDI;
+@@ -135,6 +141,7 @@ void MidiUsbTransport::Impl::Tx(uint8_t* buffer, size_t size)
+     MidiToUsb(buffer, size);
+     do
+     {
++#ifndef DAISY_NO_USB_HOST
+         if(config_.periph == Config::HOST)
+         {
+             MIDI_ErrorTypeDef result;
+@@ -142,6 +149,7 @@ void MidiUsbTransport::Impl::Tx(uint8_t* buffer, size_t size)
+             should_retry = (result == MIDI_BUSY) && attempt_count--;
+         }
+         else
++#endif
+         {
+             UsbHandle::Result result;
+             if(config_.periph == Config::EXTERNAL)
+@@ -301,7 +309,15 @@ void MidiUsbTransport::Impl::MidiToUsb(uint8_t* buffer, size_t size)
+         size_t next_status = status_index;
+         for(size_t j = status_index + 1; j < size; j++)
+         {
+-            if(buffer[j] & 0x80)
++            if(buffer[status_index] == 0xF0)
++            {
++                if(buffer[j] == 0xF7)
++                {
++                    next_status = j + 1;
++                    break;
++                }
++            }
++            else if(buffer[j] & 0x80)
+             {
+                 next_status = j;
+                 break;
+diff --git a/src/per/i2c.cpp b/src/per/i2c.cpp
+index 16e5fe25..f4bec7b3 100644
+--- a/src/per/i2c.cpp
++++ b/src/per/i2c.cpp
+@@ -313,6 +313,8 @@ I2CHandle::Result I2CHandle::Impl::Init(const I2CHandle::Config& config)
+     config_                   = config;
+     I2C_TypeDef* instances[4] = {I2C1, I2C2, I2C3, I2C4}; // map HAL instances
+     i2c_hal_handle_.Instance  = instances[i2cIdx];
++    i2c_hal_handle_.State     = HAL_I2C_STATE_RESET;
++    i2c_hal_handle_.Lock      = HAL_UNLOCKED;
+ 
+     // Set Generic Parameters
+     // Configure Speed
+@@ -374,7 +376,15 @@ I2CHandle::Result I2CHandle::Impl::TransmitBlocking(uint16_t address,
+                                                     uint32_t timeout)
+ {
+     // wait for previous transfer to be finished
+-    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {};
++    uint32_t wait_start = System::GetNow();
++    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {
++        if(HAL_I2C_GetState(&i2c_hal_handle_) == HAL_I2C_STATE_ERROR
++           || (System::GetNow() - wait_start > 10)) {
++            i2c_hal_handle_.State = HAL_I2C_STATE_READY;
++            i2c_hal_handle_.Lock  = HAL_UNLOCKED;
++            break;
++        }
++    };
+ 
+     HAL_StatusTypeDef status;
+     if(config_.mode == I2CHandle::Config::Mode::I2C_MASTER)
+@@ -387,7 +397,11 @@ I2CHandle::Result I2CHandle::Impl::TransmitBlocking(uint16_t address,
+         status = HAL_I2C_Slave_Transmit(&i2c_hal_handle_, data, size, timeout);
+     }
+     if(status != HAL_OK)
++    {
++        i2c_hal_handle_.Lock  = HAL_UNLOCKED;
++        i2c_hal_handle_.State = HAL_I2C_STATE_READY;
+         return I2CHandle::Result::ERR;
++    }
+ 
+     return I2CHandle::Result::OK;
+ }
+@@ -436,7 +450,15 @@ I2CHandle::Result I2CHandle::Impl::ReceiveBlocking(uint16_t address,
+                                                    uint32_t timeout)
+ {
+     // wait for previous transfer to be finished
+-    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {};
++    uint32_t wait_start = System::GetNow();
++    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {
++        if(HAL_I2C_GetState(&i2c_hal_handle_) == HAL_I2C_STATE_ERROR
++           || (System::GetNow() - wait_start > 10)) {
++            i2c_hal_handle_.State = HAL_I2C_STATE_READY;
++            i2c_hal_handle_.Lock  = HAL_UNLOCKED;
++            break;
++        }
++    };
+ 
+     HAL_StatusTypeDef status;
+     if(config_.mode == I2CHandle::Config::Mode::I2C_MASTER)
+@@ -448,7 +470,11 @@ I2CHandle::Result I2CHandle::Impl::ReceiveBlocking(uint16_t address,
+         status = HAL_I2C_Slave_Receive(&i2c_hal_handle_, data, size, timeout);
+ 
+     if(status != HAL_OK)
++    {
++        i2c_hal_handle_.Lock  = HAL_UNLOCKED;
++        i2c_hal_handle_.State = HAL_I2C_STATE_READY;
+         return I2CHandle::Result::ERR;
++    }
+ 
+     return I2CHandle::Result::OK;
+ }
+@@ -503,7 +529,14 @@ I2CHandle::Result I2CHandle::Impl::ReadDataAtAddress(uint16_t address,
+         return I2CHandle::Result::ERR;
+ 
+     // wait for previous transfer to be finished
+-    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {};
++    uint32_t wait_start = System::GetNow();
++    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {
++        if(HAL_I2C_GetState(&i2c_hal_handle_) == HAL_I2C_STATE_ERROR
++           || (System::GetNow() - wait_start > 10)) {
++            i2c_hal_handle_.State = HAL_I2C_STATE_READY;
++            break;
++        }
++    };
+     if(HAL_I2C_Mem_Read(&i2c_hal_handle_,
+                         address << 1,
+                         mem_address,
+@@ -530,7 +563,14 @@ I2CHandle::Result I2CHandle::Impl::WriteDataAtAddress(uint16_t address,
+         return I2CHandle::Result::ERR;
+ 
+     // wait for previous transfer to be finished
+-    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {};
++    uint32_t wait_start = System::GetNow();
++    while(HAL_I2C_GetState(&i2c_hal_handle_) != HAL_I2C_STATE_READY) {
++        if(HAL_I2C_GetState(&i2c_hal_handle_) == HAL_I2C_STATE_ERROR
++           || (System::GetNow() - wait_start > 10)) {
++            i2c_hal_handle_.State = HAL_I2C_STATE_READY;
++            break;
++        }
++    };
+     if(HAL_I2C_Mem_Write(&i2c_hal_handle_,
+                          address << 1,
+                          mem_address,
+diff --git a/src/sys/system.cpp b/src/sys/system.cpp
+index faa9eae3..ae03165e 100644
+--- a/src/sys/system.cpp
++++ b/src/sys/system.cpp
+@@ -11,8 +11,8 @@
+ extern "C"
+ {
+     extern void dsy_i2c_global_init();
+-    extern void dsy_spi_global_init();
+-    extern void dsy_uart_global_init();
++    __attribute__((weak)) void dsy_spi_global_init() {}
++    __attribute__((weak)) void dsy_uart_global_init() {}
+ }
+ 
+ // boot info struct declared in persistent backup SRAM
+@@ -94,29 +94,37 @@ extern "C"
+     }
+ 
+     /** USB IRQ Handlers since they are shared resources for multiple classes */
++#ifndef DAISY_NO_USB_HOST
+     extern HCD_HandleTypeDef hhcd_USB_OTG_HS;
++#endif
+     extern PCD_HandleTypeDef hpcd_USB_OTG_HS;
+ 
+     void OTG_HS_EP1_OUT_IRQHandler(void)
+     {
++#ifndef DAISY_NO_USB_HOST
+         if(hhcd_USB_OTG_HS.Instance)
+             HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);
++#endif
+         if(hpcd_USB_OTG_HS.Instance)
+             HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
+     }
+ 
+     void OTG_HS_EP1_IN_IRQHandler(void)
+     {
++#ifndef DAISY_NO_USB_HOST
+         if(hhcd_USB_OTG_HS.Instance)
+             HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);
++#endif
+         if(hpcd_USB_OTG_HS.Instance)
+             HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
+     }
+ 
+     void OTG_HS_IRQHandler(void)
+     {
++#ifndef DAISY_NO_USB_HOST
+         if(hhcd_USB_OTG_HS.Instance)
+             HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);
++#endif
+         if(hpcd_USB_OTG_HS.Instance)
+             HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
+     }

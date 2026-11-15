@@ -1,0 +1,80 @@
+// Bends Slot Registry (X-Macro)
+// Format: X(Name, CombineRule, AttackMs, ReleaseMs, Rate)
+// CombineRule: Sum, Max
+// Rate: Block (control-rate 750Hz), Audio (audio-rate per-sample 48kHz)
+
+// Preamp
+X(PreampDrive,       Sum, 5,  40, Block)
+X(PreampBias,        Sum, 5,  40, Block)
+X(PreampMute,        Max, 0,  20, Block)
+X(AmpTremolo,        Max, 1,  20, Audio)
+X(AmpOscVoice,       Max, 2,  50, Block)
+X(AmpFltLoop,        Max, 5,  40, Block)
+X(AmpFbkLoop,        Max, 5,  40, Block)
+
+// Filter
+X(FltCutoff,         Sum, 2,  30, Audio)
+X(FltRes,            Sum, 5,  40, Block)
+X(FltPing,           Max, 0,  80, Block)
+X(FltClockStep,      Sum, 1,  20, Audio)
+X(FltWavefold,       Max, 5,  40, Block)
+
+// Clock
+X(ClkRate,           Sum, 2,  40, Audio)
+X(ClkHold,           Max, 0,  50, Block)
+X(ClkOverclock,      Max, 5,  30, Block)
+X(ClkChime,          Max, 1,  30, Block)
+X(ClkSwing,          Max, 2,  40, Block)
+
+// Oscillator
+X(OscSubOctave,      Max, 1,  20, Block)
+X(OscShapeWarp,      Max, 2,  30, Block)
+X(OscFm,             Sum, 0,  15, Audio)
+X(OscRunglerLock,    Max, 1,  30, Block)
+X(OscSync,           Max, 0,  20, Block)
+
+// Delay: Speed / Rate
+X(DlyBrake,          Max, 0, 150, Block)
+X(DlyReverse,        Max, 0,  80, Block)
+X(DlySparkle,        Max, 2,  40, Block)
+X(DlyClockFm,        Sum, 1,  20, Audio)
+
+// Delay: Time / Addressing
+X(DlyHeadMod,        Sum, 1,  30, Audio)
+X(DlyPhaseMod,       Sum, 0,  10, Audio)
+X(DlyRestart,        Max, 0,  30, Block)
+X(DlyChop,           Max, 0,  20, Block)
+X(DlySkip,           Max, 0,  30, Block)
+X(DlyScatter,        Max, 2,  40, Block)
+X(DlyBufferJump,     Max, 1,  50, Block)
+X(DlyDataShort,      Max, 1,  50, Block)
+X(DlyDropout,        Max, 1,  40, Block)
+X(DlyStereoSplit,    Max, 2,  40, Block)
+
+// Delay: Feedback Path
+X(DlyPingPong,       Max, 5,  40, Block)
+X(DlySmear,          Max, 5,  60, Block)
+X(DlyRunaway,        Max, 5,  40, Block)
+X(DlyClockBurst,     Max, 1,  20, Audio)
+X(DlyFilterLoop,     Max, 5,  50, Block)
+X(DlyRecircFm,       Sum, 1,  20, Audio)
+X(DlyFeedbackDrain,  Max, 1,  30, Block)
+X(DlyInfiniteHold,   Max, 1,  30, Block)
+X(DlyLarsenHowl,     Max, 2,  40, Block)
+X(DlyFbkGlitch,      Max, 2,  40, Block)
+
+// Mixer & Master Output
+X(MixTremolo,        Max, 2,  30, Audio)
+X(MixFilterIsol,     Max, 2,  30, Block)
+X(MixWetOnly,        Max, 2,  30, Block)
+X(MixDrive,          Max, 2,  40, Block)
+X(MixAmpDirect,      Max, 2,  30, Block)
+X(MixDropout,        Max, 1,  20, Block)
+X(MasterCrash,       Max, 0,  50, Block)
+X(MasterMute,        Max, 0,  20, Block)
+// Contact Mic & Chassis
+X(MicFeedback,       Max, 2,  40, Block)
+X(MicBoost,          Max, 2,  40, Block)
+X(MicToFbk,          Max, 2,  40, Block)
+X(HumVoice,          Max, 2,  40, Block)
+X(Microsounds,       Max, 2,  40, Block)
