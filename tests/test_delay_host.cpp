@@ -241,9 +241,9 @@ int main() {
     assert(!any_s33_xfade);
 
     // ----------------------------------------------------
-    // Test 7: S34 DLY Karplus Smooth Portamento
+    // Test 7: S34 DLY Karplus Smooth Portamento & Anti-Zipper Verification
     // ----------------------------------------------------
-    std::cout << "\nTest 7: S34 DLY in Karplus Territory Glides Smoothly (No Clicks, No Xfades)..." << std::endl;
+    std::cout << "\nTest 7: S34 DLY in Karplus Territory Glides Smoothly (No Clicks, No Xfades, Per-Sample Continuous)..." << std::endl;
     delay.Clear();
     while (delay.Memory().IsClearing()) {
         delay.ServiceIncrementalClear(65536);
@@ -253,16 +253,29 @@ int main() {
     for (int i = 0; i < 200; ++i) delay.Process(Stereo(0.1f, 0.1f), reg, 0.0f, 0.0f);
 
     bool any_karplus_xfade = false;
+    float max_sample_delta = 0.0f;
+    int samples_with_sub_sample_movement = 0;
+    float prev_head = delay.Heads().HeadA();
+
     for (float dly = 0.05f; dly <= 0.15f; dly += 0.005f) {
         reg.Reset();
         delay.PrepareBlock(dly, 0.50f, reg);
         for (int i = 0; i < 64; ++i) {
             delay.Process(Stereo(0.1f, 0.1f), reg, 0.0f, 0.0f);
             if (delay.Heads().IsXfadeActive()) any_karplus_xfade = true;
+            float cur_head = delay.Heads().HeadA();
+            float delta = std::abs(cur_head - prev_head);
+            if (delta > max_sample_delta) max_sample_delta = delta;
+            if (delta > 0.0001f) samples_with_sub_sample_movement++;
+            prev_head = cur_head;
         }
     }
     std::cout << "  Crossfades in Karplus string sweep: " << (any_karplus_xfade ? "YES (FAIL)" : "NONE (PASS)") << std::endl;
+    std::cout << "  Max per-sample read head delta: " << max_sample_delta << " samples" << std::endl;
+    std::cout << "  Samples with per-sample smooth movement: " << samples_with_sub_sample_movement << " / " << (21 * 64) << std::endl;
     assert(!any_karplus_xfade);
+    assert(max_sample_delta < 0.20f);
+    assert(samples_with_sub_sample_movement > 1000);
 
     // ----------------------------------------------------
     // Test 8: Rapid Retrigger Jump Test
@@ -407,6 +420,42 @@ int main() {
         assert(chop_reg.time.is_chop == true);
         assert(chop_reg.time.loop_len < 4320.0f);
         std::cout << "  CLK - DLY Chop Pitch Stability: PASS" << std::endl;
+
+        // Test light touch pressure probability & graceful release:
+        AmountBus light_amounts;
+        light_amounts.Init();
+        light_amounts.Apply(Slot::DlyChop, 0.25f); // Light pressure ~25% probability
+        for (int i = 0; i < 60; ++i) light_amounts.UpdateBlock();
+
+        DelayBends light_bends;
+        chop_reg.Reset();
+        chop_ctx.clk_beat = false;
+        // Initial onset triggers slice
+        light_bends.Update(light_amounts, false, chop_reg, chop_ctx);
+        assert(chop_reg.time.has_loop == true);
+
+        // Run through beats to verify clock-accumulated probability and pass-through:
+        int loop_count = 0;
+        int pass_count = 0;
+        for (int beat = 0; beat < 16; ++beat) {
+            chop_ctx.clk_beat = true;
+            for (int b = 0; b < 10; ++b) {
+                chop_reg.Reset();
+                light_bends.Update(light_amounts, false, chop_reg, chop_ctx);
+            }
+            chop_ctx.clk_beat = false;
+            for (int b = 0; b < 20; ++b) {
+                chop_reg.Reset();
+                light_bends.Update(light_amounts, false, chop_reg, chop_ctx);
+            }
+            if (chop_reg.time.has_loop) loop_count++;
+            else pass_count++;
+        }
+        std::cout << "  Light touch probability: " << loop_count << " repeating beats, "
+                  << pass_count << " live pass-through beats" << std::endl;
+        assert(loop_count > 0);
+        assert(pass_count > 0);
+        std::cout << "  Pressure-driven probability & pass-through: PASS" << std::endl;
     }
 
     // ----------------------------------------------------
@@ -543,8 +592,204 @@ int main() {
         std::cout << "  DLY - VCC Scatter Varispeed Pitch & Feedback Excitation: PASS" << std::endl;
     }
 
+    // ----------------------------------------------------
+    // Test 16: CLK + DLY + OSC Multi-Mode Chop (Saw, Sin, Rnd)
+    // ----------------------------------------------------
+    std::cout << "\nTest 16: CLK + DLY + OSC Multi-Mode Chop..." << std::endl;
+    {
+        DelayRegisters osc_reg;
+        DelayContext osc_ctx;
+        osc_ctx.knob_clk = 1.0f;
+        osc_ctx.clk_rate = 2.0f;
+        osc_ctx.osc_stutter = true; // 3-pad bend active!
+        osc_ctx.osc_freq = 8.0f;   // 8 Hz -> ~6000 samples
+
+        AmountBus chop_amounts;
+        chop_amounts.Init();
+        chop_amounts.Apply(Slot::DlyChop, 1.0f);
+        for (int i = 0; i < 60; ++i) chop_amounts.UpdateBlock();
+
+        DelayBends chop_bends;
+
+        // 1. Saw Mode (ModeSaw = 1): Reverse playback / pendulum
+        osc_ctx.osc_mode = 1;
+        osc_ctx.clk_beat = true;
+        for (int b = 0; b < 20; ++b) {
+            osc_reg.Reset();
+            chop_bends.Update(chop_amounts, false, osc_reg, osc_ctx);
+        }
+        std::cout << "  Saw Mode Speed: " << osc_reg.speed.speed << " (Expected reverse < 0.0f)" << std::endl;
+        assert(osc_reg.speed.speed < 0.0f);
+
+        // 2. Sin Mode (ModeSin = 0): Musical repeats & octave variation
+        osc_ctx.osc_mode = 0;
+        osc_ctx.clk_beat = false;
+        for (int b = 0; b < 20; ++b) {
+            osc_reg.Reset();
+            chop_bends.Update(chop_amounts, false, osc_reg, osc_ctx);
+        }
+        std::cout << "  Sin Mode Speed: " << osc_reg.speed.speed << " (Expected forward >= 1.0f)" << std::endl;
+        assert(osc_reg.speed.speed >= 1.0f);
+
+        // 3. Rnd Mode (ModeRnd = 2): Chaotic slicing with speed zones
+        osc_ctx.osc_mode = 2;
+        osc_ctx.clk_beat = true;
+        for (int b = 0; b < 20; ++b) {
+            osc_reg.Reset();
+            chop_bends.Update(chop_amounts, false, osc_reg, osc_ctx);
+        }
+        std::cout << "  Rnd Mode Speed: " << osc_reg.speed.speed << std::endl;
+        assert(osc_reg.time.has_loop == true);
+
+        // 4. OSC Frequency Octave Folding: high frequency (120 Hz) folds into musical range
+        osc_ctx.osc_freq = 120.0f;
+        for (int b = 0; b < 20; ++b) {
+            osc_reg.Reset();
+            chop_bends.Update(chop_amounts, false, osc_reg, osc_ctx);
+        }
+        std::cout << "  Chop Loop Length with folded 120Hz OSC: " << osc_reg.time.loop_len << " (Expected between 1000 and 8000)" << std::endl;
+        assert(osc_reg.time.loop_len >= 1000.0f && osc_reg.time.loop_len <= 8000.0f);
+        std::cout << "  CLK + DLY + OSC Multi-Mode Chop: PASS" << std::endl;
+    }
+
+    // ----------------------------------------------------
+    // Test 17: DLY - GND Skip Controller Bit Fracture & Slip
+    // ----------------------------------------------------
+    std::cout << "\nTest 17: DLY - GND Skip Controller Bit Fracture & Slip..." << std::endl;
+    {
+        DelayRegisters skip_reg;
+        DelayContext skip_ctx;
+        DelayBends skip_bends;
+
+        AmountBus skip_amounts;
+        skip_amounts.Init();
+        skip_amounts.Apply(Slot::DlySkip, 1.0f);
+        for (int i = 0; i < 60; ++i) skip_amounts.UpdateBlock();
+
+        bool saw_stuck_mask = false;
+        for (int b = 0; b < 80; ++b) {
+            skip_reg.Reset();
+            skip_bends.Update(skip_amounts, false, skip_reg, skip_ctx);
+            if (skip_reg.data.stuck_mask != 0) saw_stuck_mask = true;
+        }
+
+        std::cout << "  Skip Cautious Bit Fracture (stuck_mask): " << (saw_stuck_mask ? "ACTIVE" : "NONE") << std::endl;
+        std::cout << "  Skip Bounded Feedback: " << skip_reg.feedback.gain << " (Expected <= 0.82f)" << std::endl;
+        assert(saw_stuck_mask == true);
+        assert(skip_reg.feedback.gain <= 0.82f);
+        std::cout << "  DLY - GND Skip Controller Bit Fracture & Slip: PASS" << std::endl;
+    }
+
+    // ----------------------------------------------------
+    // Test 18: Low-Voltage Sneak Glitch (Beat Repeat / Reverse Hiccup)
+    // ----------------------------------------------------
+    std::cout << "\nTest 18: Low-Voltage Sneak Glitch (Beat Repeat / Reverse Hiccup)..." << std::endl;
+    {
+        DelayRegisters vcc_reg;
+        DelayContext vcc_ctx;
+        vcc_ctx.clk_rate = 2.0f; // 2 Hz clock
+        vcc_ctx.is_frozen = false;
+
+        DelayBends vcc_bends;
+        AmountBus no_amounts;
+        no_amounts.Init();
+
+        // 1. Under nominal rail voltage (VCC = 1.0V), sneak glitch never triggers
+        vcc_ctx.vcc = 1.0f;
+        bool nominal_glitch = false;
+        for (int b = 0; b < 2000; ++b) {
+            vcc_reg.Reset();
+            vcc_ctx.clk_beat = (b % 375 == 0);
+            vcc_bends.Update(no_amounts, false, vcc_reg, vcc_ctx);
+            if (vcc_reg.time.has_loop || vcc_reg.speed.speed < 0.0f) {
+                nominal_glitch = true;
+            }
+        }
+        std::cout << "  Nominal Rail (VCC=1.0) Glitches: " << (nominal_glitch ? "DETECTED (FAIL)" : "NONE (PASS)") << std::endl;
+        assert(!nominal_glitch);
+
+        // 2. Under low rail voltage (VCC = 0.20V), sporadic sneak glitches occur
+        vcc_ctx.vcc = 0.20f;
+        int sneak_events = 0;
+        bool saw_reverse = false;
+        bool saw_repeat = false;
+        for (int b = 0; b < 10000; ++b) {
+            vcc_reg.Reset();
+            vcc_ctx.clk_beat = (b % 375 == 0);
+            vcc_bends.Update(no_amounts, false, vcc_reg, vcc_ctx);
+            if (vcc_reg.time.has_loop) {
+                sneak_events++;
+                if (vcc_reg.speed.speed < 0.0f) saw_reverse = true;
+                if (vcc_reg.speed.speed > 0.0f) saw_repeat = true;
+            }
+        }
+        std::cout << "  Low Rail (VCC=0.20) Sneak Glitch Active Blocks: " << sneak_events << std::endl;
+        std::cout << "  Saw Reverse Hiccup: " << (saw_reverse ? "YES" : "NO") << std::endl;
+        std::cout << "  Saw Repeat Hiccup:  " << (saw_repeat ? "YES" : "NO") << std::endl;
+        assert(sneak_events > 0);
+        assert(saw_reverse || saw_repeat);
+        std::cout << "  Low-Voltage Sneak Glitch: PASS" << std::endl;
+    }
+
+    // ----------------------------------------------------
+    // Test 19: OSC -> CLK Full 48kHz Continuous Doppler Vibrato (Anti-Aliased at 2.0x Overclock)
+    // ----------------------------------------------------
+    std::cout << "\nTest 19: OSC -> CLK Full 48kHz Continuous Doppler Vibrato (No 12kHz Steps, No Write Jitter at 2.0x)..." << std::endl;
+    {
+        delay.Clear();
+        while (delay.Memory().IsClearing()) {
+            delay.ServiceIncrementalClear(65536);
+        }
+
+        // Delay at S33 = 1.0 (2.0x overclock, 96 kHz equivalent write speed)
+        DelayRegisters vib_reg;
+        for (int b = 0; b < 50; ++b) {
+            vib_reg.Reset();
+            delay.PrepareBlock(0.40f, 1.00f, vib_reg);
+        }
+
+        // Fill buffer with clean 440 Hz tone
+        for (int n = 0; n < 10000; ++n) {
+            if ((n % 64) == 0) {
+                vib_reg.Reset();
+                delay.PrepareBlock(0.40f, 1.00f, vib_reg);
+            }
+            float tone = std::sin(2.0f * kPi * 440.0f * n / 48000.0f) * 0.5f;
+            delay.Process(Stereo(tone, tone), vib_reg, 0.0f, 0.0f);
+        }
+
+        // Now activate 5 Hz vibrato at full 48 kHz per-sample evaluation with span = 260 samples
+        float max_delta = 0.0f;
+        float prev_out = 0.0f;
+        for (int n = 0; n < 4800; ++n) {
+            if ((n % 64) == 0) {
+                vib_reg.Reset();
+                delay.PrepareBlock(0.40f, 1.00f, vib_reg);
+            }
+            // 48 kHz continuous sinusoidal phase modulation
+            float osc_phase = static_cast<float>(n % 9600) / 9600.0f; // 5 Hz
+            float phase_mod = std::sin(osc_phase * 2.0f * kPi) * 260.0f * 0.85f;
+            vib_reg.time.mod_offset = phase_mod;
+            vib_reg.clock.fm = 0.0f; // Write pointer isolated from audio-rate FM!
+
+            float tone = std::sin(2.0f * kPi * 440.0f * (10000 + n) / 48000.0f) * 0.5f;
+            Stereo out = delay.Process(Stereo(tone, tone), vib_reg, 0.0f, 0.0f);
+
+            assert(!std::isnan(out.l) && !std::isinf(out.l));
+            if (n > 10) {
+                float d = std::abs(out.l - prev_out);
+                if (d > max_delta) max_delta = d;
+            }
+            prev_out = out.l;
+        }
+
+        std::cout << "  Max per-sample output delta during 2.0x vibrato: " << max_delta << std::endl;
+        assert(max_delta < 0.25f); // Smooth audio-rate waveform, no 12kHz stair-step clicks!
+        std::cout << "  OSC -> CLK Anti-Aliased Vibrato at 2.0x Overclock: PASS" << std::endl;
+    }
+
     std::cout << "\n========================================" << std::endl;
-    std::cout << "ALL 15 TESTS PASSED!" << std::endl;
+    std::cout << "ALL 19 TESTS PASSED!" << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

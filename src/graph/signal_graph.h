@@ -82,6 +82,8 @@ public:
         _in_env = 0.0f;
         _out_env = 0.0f;
         _dly_env = 0.0f;
+        _cur_flt_cutoff = 0.0f;
+        _cur_dly_clk_fm = 0.0f;
         _prev_tap_count_p10 = 0;
         _prev_midi_trigger_cnt = 0;
     }
@@ -100,6 +102,8 @@ public:
         _cap_out_amp.Reset();
         _dly_in_hp = {0.0f, 0.0f};
         _flt_osc_dc = 0.0f;
+        _cur_flt_cutoff = 0.0f;
+        _cur_dly_clk_fm = 0.0f;
         _in_env = 0.0f;
         _out_env = 0.0f;
         _dly_env = 0.0f;
@@ -240,8 +244,20 @@ public:
         float eff_dly_knob = state.s34_dly;
         float amt_dly_head_mod = amounts.Get(Slot::DlyHeadMod);
         bool instant_dly = false;
+        float base_samp = std::max(tuning::kMinDelaySamples, _delay.BaseSamples());
+
+        // Proportional span scaling for Karplus comb filter (< 50ms):
+        // Preserves musical pitch interval (semitones) and prevents clipping at minimum delay
+        float karplus_span_scale = 1.0f;
+        if (base_samp < tuning::kKarplusMaxSamples) {
+            karplus_span_scale = std::clamp((base_samp - tuning::kMinDelaySamples) * (1.0f / tuning::kKarplusMaxSamples), 0.04f, 1.0f);
+        }
+        _cached_clk_vibrato_span = 260.0f * karplus_span_scale;
+
         if (amt_dly_head_mod > 0.015f) {
+
             if (frame.osc_mode == Oscillator::ModeRnd) {
+                _prev_dly_hop_active = true;
                 // S&H delay sequencer: random steps trigger jumps to delay taps
                 uint8_t cur_step = _osc.RndStep();
                 if (cur_step != _prev_rnd_step) {
@@ -251,18 +267,36 @@ public:
                         0.50f, 0.875f, 0.3125f, 0.625f, 0.25f, 0.6875f, 0.4375f, 0.8125f
                     };
                     float tap_frac = kTapFractions[cur_step & 0x0F];
-                    float base_samp = std::max(tuning::kMinDelaySamples, _delay.BaseSamples());
                     float tap_offset = std::clamp(base_samp * (0.25f + tap_frac * 1.50f * amt_dly_head_mod),
                                                   tuning::kMinDelaySamples,
                                                   static_cast<float>(tuning::kDelayFrames - 4800));
                     state.delay_regs.time.RequestJump(tap_offset, 64);
                 }
             } else {
-                // Saw / Sin modes: modulates delay time parameter
-                float osc_wave = (frame.osc_mode == Oscillator::ModeSaw) ? (_osc.Phase() - 0.5f) * 2.0f : FastSin(_osc.Phase() * kTwoPi);
-                float depth = 0.20f * amt_dly_head_mod;
-                eff_dly_knob = std::clamp(state.s34_dly + osc_wave * depth, 0.005f, 1.0f);
+                if (_prev_dly_hop_active) {
+                    _prev_dly_hop_active = false;
+                    _prev_rnd_step = 255;
+                    state.delay_regs.time.RequestJump(base_samp, 128);
+                }
+                if (frame.osc_mode == Oscillator::ModeSaw) {
+                    // Saw mode: Unidirectional forward granular scrub across delay memory
+                    float saw_phase = _osc.Phase();
+                    float depth = 0.35f * amt_dly_head_mod;
+                    eff_dly_knob = std::clamp(state.s34_dly + (saw_phase - 0.5f) * depth, 0.005f, 1.0f);
+                    instant_dly = true;
+                } else if (frame.osc_mode == Oscillator::ModeSin) {
+                    // Sin mode: Smooth bidirectional back-and-forth sweep (like turning DLY knob with an LFO)
+                    float sin_wave = FastSin(_osc.Phase() * kTwoPi);
+                    float depth = 0.25f * amt_dly_head_mod;
+                    eff_dly_knob = std::clamp(state.s34_dly + sin_wave * depth, 0.005f, 1.0f);
+                    instant_dly = true;
+                }
             }
+        } else if (_prev_dly_hop_active) {
+            _prev_dly_hop_active = false;
+            _prev_rnd_step = 255;
+            float base_samp = std::max(tuning::kMinDelaySamples, _delay.BaseSamples());
+            state.delay_regs.time.RequestJump(base_samp, 128);
         }
 
         _delay.PrepareBlock(eff_dly_knob, state.s33_clk, state.delay_regs, 0.0f, override_delay_samples, instant_dly);
@@ -461,13 +495,22 @@ public:
         const float amt_microsounds  = amounts.Get(Slot::Microsounds);
         const float amt_mic_fbk      = amounts.Get(Slot::MicFeedback);
         const float shunt_both       = state.retention[NodeMix] * state.retention[NodeOut];
+        const float eff_pre_retention = pre_mute_factor * state.retention[NodeAmp];
+        const float osc_retention = state.retention[NodeOsc];
+        const bool scale_osc_retention = (osc_retention < 0.999f);
+        const float clk_retention = state.retention[NodeClk];
+        const bool scale_clk_retention = (clk_retention < 0.999f);
 
         FilterMods flt_mods_base{};
         flt_mods_base.resonance = amounts.Get(Slot::FltRes) + (state.motorboat_pulse > 0.001f ? state.motorboat_pulse * 0.08f : 0.0f);
         flt_mods_base.wavefold = amounts.Get(Slot::FltWavefold);
 
+        float cached_sample_vcc  = rail.EffectiveVcc();
+        float cached_sample_starve = daisysp::fclamp(1.0f - cached_sample_vcc, 0.0f, 1.0f);
         float cached_clk_fm      = amt_clk_rate;
-        float cached_flt_cutoff  = amt_flt_cutoff;
+        float cur_flt_cutoff     = _cur_flt_cutoff;
+        float inc_flt_cutoff     = (amt_flt_cutoff - cur_flt_cutoff) * (1.0f / static_cast<float>(size));
+        float cached_flt_cutoff_eff = cur_flt_cutoff;
         float cached_flt_clk     = amt_flt_clk;
         float cached_dly_phase   = amt_dly_phase;
         float cached_dly_recirc  = amt_dly_recirc;
@@ -475,8 +518,11 @@ public:
         float cached_osc_fm      = amt_osc_fm;
         float cached_amp_trem    = amt_amp_trem;
         float cached_pre_drive   = amt_pre_drive;
-        float cached_dly_clk_fm  = amt_dly_clk_fm;
+        float cached_dly_clk_fm  = 0.0f;
         float cached_mix_trem    = amt_mix_trem;
+
+        float cur_dly_clk_fm     = _cur_dly_clk_fm;
+        float inc_dly_clk_fm     = (amt_dly_clk_fm - cur_dly_clk_fm) * (1.0f / static_cast<float>(size));
 
         float block_peak = 0.0f;
         float cached_quad_osc = 0.0f;
@@ -495,7 +541,7 @@ public:
 
         float cached_inj_osc = 0.0f, cached_inj_amp = 0.0f, cached_inj_flt = 0.0f, cached_inj_dly = 0.0f, cached_inj_mix = 0.0f;
         float cached_cap_osc_amp = 0.0f, cached_cap_osc_flt = 0.0f, cached_cap_flt_amp = 0.0f, cached_cap_fbk_amp = 0.0f, cached_cap_out_amp = 0.0f;
-        Stereo cached_flt_loop{0.0f, 0.0f}, cached_fbk_loop{0.0f, 0.0f}, cached_out_loop{0.0f, 0.0f};
+        Stereo cached_flt_loop{0.0f, 0.0f}, cached_fbk_loop{0.0f, 0.0f}, cached_out_loop{0.0f, 0.0f}, cached_loop_sum{0.0f, 0.0f};
 
         uint32_t c_clk = 0, c_osc = 0, c_pre = 0, c_flt = 0, c_dly = 0, c_mix = 0, c_out = 0;
 
@@ -547,38 +593,47 @@ public:
             bool profile_sample = __builtin_expect(n == 0, 0);
             uint32_t t_sub = profile_sample ? DWT->CYCCNT : 0;
 
-            // Dynamic audio-rate power rail breathing:
-            // Output stage and feedback loop current draw pull down the rail
-            float out_peak = 0.5f * (std::abs(_bus.out_sig.l) + std::abs(_bus.out_sig.r));
-            float fbk_peak = 0.5f * (std::abs(_bus.fbk.l) + std::abs(_bus.fbk.r));
-            float loop_peak = std::max(out_peak, fbk_peak);
-            float audio_ripple = -loop_peak * (0.06f + 0.35f * state.starve);
-            float pump_ripple = __builtin_expect(eff_pump_scale > 0.001f, 0) ? (_bus.osc.l * eff_pump_scale) : 0.0f;
-            float sample_vcc = rail.Tick(audio_ripple + pump_ripple);
-            float sample_starve = daisysp::fclamp(1.0f - sample_vcc, 0.0f, 1.0f);
+            cur_flt_cutoff += inc_flt_cutoff;
+            cur_dly_clk_fm += inc_dly_clk_fm;
+
+            // Dynamic audio-rate power rail breathing (evaluated at 24 kHz for efficiency):
+            if ((n & 1) == 0) {
+                float out_peak = 0.5f * (std::abs(_bus.out_sig.l) + std::abs(_bus.out_sig.r));
+                float fbk_peak = 0.5f * (std::abs(_bus.fbk.l) + std::abs(_bus.fbk.r));
+                float loop_peak = std::max(out_peak, fbk_peak);
+                float audio_ripple = -loop_peak * (0.06f + 0.35f * state.starve);
+                float pump_ripple = __builtin_expect(eff_pump_scale > 0.001f, 0) ? (_bus.osc.l * eff_pump_scale) : 0.0f;
+                cached_sample_vcc = rail.Tick(audio_ripple + pump_ripple);
+                cached_sample_starve = daisysp::fclamp(1.0f - cached_sample_vcc, 0.0f, 1.0f);
+            }
+            float sample_vcc = cached_sample_vcc;
+            float sample_starve = cached_sample_starve;
 
             // Clock & ModMatrix (12 kHz interleaved eval)
-            switch (n & 3) {
-            case 0:
+            if (__builtin_expect(has_any_mod, 0)) {
+                switch (n & 3) {
+                case 0:
+                    osc_vcc_sag = mappings::OscVccSag(sample_vcc);
+                    if (has_mod_osc_fm)     cached_osc_fm     = matrix.Eval(kModOscFm, amt_osc_fm, _bus.sig_array);
+                    if (has_mod_clk_rate)   cached_clk_fm     = matrix.Eval(kModClkRate, amt_clk_rate, _bus.sig_array);
+                    if (has_mod_flt_clk)    cached_flt_clk    = matrix.Eval(kModFltClockStep, amt_flt_clk, _bus.sig_array);
+                    break;
+                case 1:
+                    if (has_mod_dly_clk_fm) cached_dly_clk_fm = matrix.Eval(kModDlyClockFm, 0.0f, _bus.sig_array);
+                    if (has_mod_dly_phase)  cached_dly_phase  = matrix.Eval(kModDlyPhaseMod, amt_dly_phase, _bus.sig_array);
+                    if (has_mod_dly_recirc) cached_dly_recirc = matrix.Eval(kModDlyRecircFm, amt_dly_recirc, _bus.sig_array);
+                    break;
+                case 2:
+                    if (has_mod_dly_burst)  cached_dly_burst  = matrix.Eval(kModDlyClockBurst, amt_dly_burst, _bus.sig_array);
+                    if (has_mod_amp_trem)   cached_amp_trem   = matrix.Eval(kModAmpTremolo, amt_amp_trem, _bus.sig_array);
+                    break;
+                case 3:
+                    if (has_mod_pre_drive)  cached_pre_drive  = matrix.Eval(kModPreampDrive, amt_pre_drive, _bus.sig_array);
+                    if (has_mod_mix_trem)   cached_mix_trem   = matrix.Eval(kModMixTremolo, amt_mix_trem, _bus.sig_array);
+                    break;
+                }
+            } else if ((n & 3) == 0) {
                 osc_vcc_sag = mappings::OscVccSag(sample_vcc);
-                if (has_mod_osc_fm)     cached_osc_fm     = matrix.Eval(kModOscFm, amt_osc_fm, _bus.sig_array);
-                if (has_mod_clk_rate)   cached_clk_fm     = matrix.Eval(kModClkRate, amt_clk_rate, _bus.sig_array);
-                if (has_mod_flt_clk)    cached_flt_clk    = matrix.Eval(kModFltClockStep, amt_flt_clk, _bus.sig_array);
-                break;
-            case 1:
-                if (has_mod_dly_clk_fm) cached_dly_clk_fm = matrix.Eval(kModDlyClockFm, amt_dly_clk_fm, _bus.sig_array);
-                if (has_mod_dly_phase)  cached_dly_phase  = matrix.Eval(kModDlyPhaseMod, amt_dly_phase, _bus.sig_array);
-                if (has_mod_dly_recirc) cached_dly_recirc = matrix.Eval(kModDlyRecircFm, amt_dly_recirc, _bus.sig_array);
-                break;
-            case 2:
-                if (has_mod_flt_cutoff) cached_flt_cutoff = matrix.Eval(kModFltCutoff, amt_flt_cutoff, _bus.sig_array);
-                if (has_mod_dly_burst)  cached_dly_burst  = matrix.Eval(kModDlyClockBurst, amt_dly_burst, _bus.sig_array);
-                if (has_mod_amp_trem)   cached_amp_trem   = matrix.Eval(kModAmpTremolo, amt_amp_trem, _bus.sig_array);
-                break;
-            case 3:
-                if (has_mod_pre_drive)  cached_pre_drive  = matrix.Eval(kModPreampDrive, amt_pre_drive, _bus.sig_array);
-                if (has_mod_mix_trem)   cached_mix_trem   = matrix.Eval(kModMixTremolo, amt_mix_trem, _bus.sig_array);
-                break;
             }
             float clk_fm = cached_clk_fm;
             if (state.topology.rungler_triad && frame.osc_mode == Oscillator::ModeRnd) {
@@ -586,7 +641,7 @@ public:
             }
             float s_clk = 0.0f;
             _clock.Tick(sample_vcc, clk_fm, cmods_base, state.osc_mode, _bus.osc.l, _bus.osc_ramp, s_clk);
-            s_clk *= state.retention[NodeClk];
+            if (__builtin_expect(scale_clk_retention, 0)) s_clk *= clk_retention;
             if (profile_sample) { c_clk = DWT->CYCCNT - t_sub; t_sub = DWT->CYCCNT; }
 
             // Oscillator
@@ -599,7 +654,7 @@ public:
             bool clk_square = (_clock.Phase() < 0.5f);
             _osc.Tick(state.osc_mode, sample_vcc, osc_vcc_sag, osc_in, omods_base,
                       s_osc, osc_ramp, osc_reset, osc_sub, _clock.Beat(), clk_square, node_signals[NodeIn]);
-            s_osc *= state.retention[NodeOsc];
+            if (__builtin_expect(scale_osc_retention, 0)) s_osc *= osc_retention;
             if (profile_sample) { c_osc = DWT->CYCCNT - t_sub; }
 
             if (has_any_mod) {
@@ -643,17 +698,18 @@ public:
                 clk_bleed_gain = std::clamp(clk_bleed_gain + clk_amp_bleed_boost, 0.0f, 1.0f);
             }
             float clk_to_amp_bleed = clk_bleed_gain * s_clk * 0.85f;
-
-            float osc_inject_l = s_osc * cap_g_osc_amp * 0.10f + inj_amp * 0.25f + clk_to_amp_bleed;
+            float common_inj = inj_amp * 0.25f + clk_to_amp_bleed;
+            float osc_scale = cap_g_osc_amp * 0.10f;
+            float osc_inject_l = s_osc * osc_scale + common_inj;
             float s_osc_r = s_osc;
             if (frame.osc_mode == Oscillator::ModeRnd && omods_base.shape_warp < 0.5f) {
                 float osc_v_scale = (sample_vcc > 0.05f) ? (0.75f + 0.25f * sample_vcc) : (sample_vcc * 15.0f);
                 float core_rnd = _osc.RndHeld();
                 float rnd_diff = (_osc.RndHeldR() - core_rnd) * 0.20f;
-                osc_inject_l = (core_rnd - rnd_diff) * osc_v_scale * cap_g_osc_amp * 0.10f + inj_amp * 0.25f + clk_to_amp_bleed;
+                osc_inject_l = (core_rnd - rnd_diff) * (osc_v_scale * osc_scale) + common_inj;
                 s_osc_r = (core_rnd + rnd_diff) * osc_v_scale;
             }
-            float osc_inject_r = s_osc_r * cap_g_osc_amp * 0.10f + inj_amp * 0.25f + clk_to_amp_bleed;
+            float osc_inject_r = s_osc_r * osc_scale + common_inj;
             _bus.osc = Stereo(s_osc, s_osc_r);
             _bus.osc_ramp = osc_ramp;
             if ((n & 3) == 0) {
@@ -667,10 +723,8 @@ public:
                     cached_fbk_loop = (cap_g_fbk_amp > 0.0001f) ? (_bus.fbk * (1.18f * cap_g_fbk_amp * fbk_amp_scale * vcc_loop_comp)) : Stereo(0.0f, 0.0f);
                 }
                 cached_out_loop = (cap_g_out_amp > 0.0001f) ? (_bus.out_sig * (1.15f * cap_g_out_amp * out_amp_scale * vcc_loop_comp)) : Stereo(0.0f, 0.0f);
+                cached_loop_sum = cached_flt_loop + cached_fbk_loop + cached_out_loop;
             }
-            Stereo flt_loop = cached_flt_loop;
-            Stereo fbk_loop = cached_fbk_loop;
-            Stereo out_loop = cached_out_loop;
 
             if (state.topology.intermod_loop) {
                 pmods.bias += cached_intermod * 0.35f;
@@ -679,19 +733,23 @@ public:
             // Preamp input mute (AMP-GND spillover kill)
             in_combined *= pre_mute_factor;
 
-            Stereo in_pre = in_combined + flt_loop + fbk_loop + out_loop;
+            Stereo in_pre = in_combined + cached_loop_sum;
             Stereo amp_out;
             _preamp.Process(in_pre.l, in_pre.r, 0.0f, pmods,
                             osc_inject_l, osc_inject_r, s_hum, sample_vcc, sample_starve, state.retention[NodeAmp],
                             amp_out.l, amp_out.r);
             // AMP <-> GND hard ground shunt: silences the entire preamp stage
-            amp_out *= pre_mute_factor;
-            amp_out *= state.retention[NodeAmp];
+            amp_out *= eff_pre_retention;
             if (profile_sample) { c_pre = DWT->CYCCNT - t_sub; t_sub = DWT->CYCCNT; }
 
             // Filter stage
             FilterMods flt_mods = flt_mods_base;
-            flt_mods.cutoff_ramp = cached_flt_cutoff;
+            if ((n & 1) == 0) {
+                cached_flt_cutoff_eff = has_mod_flt_cutoff
+                                           ? matrix.Eval(kModFltCutoff, cur_flt_cutoff, _bus.sig_array)
+                                           : cur_flt_cutoff;
+            }
+            flt_mods.cutoff_ramp = cached_flt_cutoff_eff;
             flt_mods.clock_step = cached_flt_clk;
             if (state.topology.rungler_triad && frame.osc_mode == Oscillator::ModeRnd) {
                 flt_mods.cutoff_ramp += s_clk * 0.85f;
@@ -732,11 +790,29 @@ public:
 
             // Delay stage (Memory Machine)
             float phase_mod = cached_dly_phase * 320.0f;
+
+            // OSC -> CLK: Full 48 kHz continuous Doppler pitch vibrato & analog chorus (anti-aliased, zero zipper)
+            if (cur_dly_clk_fm > 0.005f) {
+                if (state.osc_mode == Oscillator::ModeSin) {
+                    float sin_wave = FastSin(_osc.Phase() * kTwoPi);
+                    phase_mod += sin_wave * (cur_dly_clk_fm * _cached_clk_vibrato_span);
+                } else if (state.osc_mode == Oscillator::ModeSaw) {
+                    float saw_phase = _osc.Phase();
+                    float grain_ramp = saw_phase;
+                    if (__builtin_expect(saw_phase > 0.94f, 0)) {
+                        float edge = (1.0f - saw_phase) * (1.0f / 0.06f);
+                        grain_ramp = 0.94f + (saw_phase - 0.94f) * edge;
+                    }
+                    float saw_wave = (grain_ramp - 0.47f) * 2.0f;
+                    phase_mod += saw_wave * (cur_dly_clk_fm * _cached_clk_vibrato_span);
+                }
+            }
+
             float dly_clk_fm = cached_dly_clk_fm;
 
             // OSC -> CLK random stepped melodies in ModeRnd
-            if (state.osc_mode == Oscillator::ModeRnd && amt_dly_clk_fm > 0.01f) {
-                dly_clk_fm += _osc.RndHeld() * 0.85f * amt_dly_clk_fm;
+            if (state.osc_mode == Oscillator::ModeRnd && cur_dly_clk_fm > 0.01f) {
+                dly_clk_fm += _osc.RndHeld() * 0.85f * cur_dly_clk_fm;
             }
 
             // Lissajous quadrature cloud (OSC + CLK + DLY)
@@ -871,6 +947,9 @@ public:
             if (p > block_peak) block_peak = p;
         }
 
+        _cur_flt_cutoff = cur_flt_cutoff;
+        _cur_dly_clk_fm = cur_dly_clk_fm;
+
         last_profile.inj = 0;
         last_profile.clock = c_clk * size;
         last_profile.osc = c_osc * size;
@@ -919,6 +998,8 @@ private:
     CapacitiveBridge _cap_out_amp;
     Stereo        _dly_in_hp{0.0f, 0.0f};
     float         _flt_osc_dc{0.0f};
+    float         _cur_flt_cutoff{0.0f};
+    float         _cur_dly_clk_fm{0.0f};
 
     float         _audio_envelope{0.0f};
     float         _in_env{0.0f};
@@ -928,6 +1009,8 @@ private:
     uint16_t      _prev_midi_trigger_cnt{0};
     bool          _prev_flt_ping_active{false};
     uint8_t       _prev_rnd_step{255};
+    bool          _prev_dly_hop_active{false};
+    float         _cached_clk_vibrato_span{260.0f};
 };
 
 } // namespace bends

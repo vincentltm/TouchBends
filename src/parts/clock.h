@@ -59,12 +59,16 @@ public:
         (void)v_rail_eff;
         _step_tick = (_step_tick + 1) & 3;
         if (_step_tick == 0) {
-            _cached_fm_mult = (std::abs(fm_input) > 0.001f) ? FastPow2(fm_input * 0.35f) : 1.0f;
-            _cached_rate_mod_mult = (mods.rate_mod > 0.001f) ? std::clamp(FastPow2(mods.rate_mod * osc_sig * 0.50f), 0.5f, 2.0f) : 1.0f;
             float r = _base_rate;
-            if (std::abs(fm_input) > 0.001f) r *= _cached_fm_mult;
-            if (mods.rate_mod > 0.001f) r *= _cached_rate_mod_mult;
+            if (__builtin_expect(std::abs(fm_input) > 0.001f, 0)) {
+                r *= FastPow2(fm_input * 0.35f);
+            }
+            if (__builtin_expect(mods.rate_mod > 0.001f, 0)) {
+                r *= std::clamp(FastPow2(mods.rate_mod * osc_sig * 0.50f), 0.5f, 2.0f);
+            }
             _cached_eff_rate = std::clamp(r, 0.05f, 12000.0f);
+            _cached_phase_inc = _cached_eff_rate * _inv_sample_rate;
+            _cached_clk_level = (v_rail_eff > 0.05f) ? (0.75f + 0.25f * v_rail_eff) : (v_rail_eff * 15.0f);
         }
         float rate = _cached_eff_rate;
         _rate = rate;
@@ -82,7 +86,7 @@ public:
                 _block_beat = true;
                 _trig_env = 1.0f;
             }
-            _phase += rate * _inv_sample_rate;
+            _phase += _cached_phase_inc;
 
             float phase_threshold = 1.0f;
             if (mods.swing > 0.01f) {
@@ -114,8 +118,7 @@ public:
                 float click = _trig_env * _trig_env * _trig_env;
                 float thump = 4.0f * _trig_env * (1.0f - _trig_env) * _trig_env;
                 float punchy_pulse = click * 0.85f + thump * 0.40f;
-                float clk_level = (v_rail_eff > 0.05f) ? (0.75f + 0.25f * v_rail_eff) : (v_rail_eff * 15.0f);
-                out_clk = punchy_pulse * clk_level;
+                out_clk = punchy_pulse * _cached_clk_level;
             }
         } else {
             out_clk = 0.0f;
@@ -143,6 +146,8 @@ private:
     float _cached_fm_mult{1.0f};
     float _cached_rate_mod_mult{1.0f};
     float _cached_eff_rate{1.0f};
+    float _cached_phase_inc{1.0f / 48000.0f};
+    float _cached_clk_level{1.0f};
 };
 
 } // namespace bends

@@ -84,7 +84,16 @@ public:
 
         _loop_drive = 1.0f + reg.runaway * 0.50f;
         _recirc_fm = reg.recirc_fm;
+        _recirc_active = (std::abs(reg.recirc_fm) > 0.01f);
+        _cached_recirc_scale = 0.95f * reg.recirc_fm;
+
         _erode_amt = reg.erode;
+        _erode_active = (reg.erode > 0.01f);
+        if (_erode_active) {
+            float er = std::min(1.0f, reg.erode);
+            _erode_g1 = (1.0f - er);
+            _erode_g2 = er * 1.05f;
+        }
 
         _target_gain = _eff_gain;
         _target_cross = _cross_inv;
@@ -144,7 +153,10 @@ public:
         _smooth_gain += _inc_gain;
 
         // Dynamic delay ducking under loud peaks (< 0.20 disabled for short delays)
-        float tucking = (_infinite_hold || in_env <= 0.08f || delay_knob_u < 0.20f) ? 1.0f : (1.0f - std::min(0.06f, (in_env - 0.08f) * 0.15f));
+        float tucking = 1.0f;
+        if (__builtin_expect(in_env > 0.08f && !_infinite_hold && delay_knob_u >= 0.20f, 0)) {
+            tucking = 1.0f - std::min(0.06f, (in_env - 0.08f) * 0.15f);
+        }
         Stereo fb_sig = crossed * (_smooth_gain * tucking);
 
         // DC offset stabilization
@@ -157,18 +169,18 @@ public:
         fb_sig.r -= _mud_hp.r * 0.08f;
 
         // 3. FLT <-> FBK Loop Erosion (high-pass whistling trails)
-        if (_erode_amt > 0.01f) {
-            float er = std::min(1.0f, _erode_amt);
+        if (__builtin_expect(_erode_active, 0)) {
             _erode.l += 0.04f * (fb_sig.l - _erode.l);
             _erode.r += 0.04f * (fb_sig.r - _erode.r);
-            fb_sig.l = fb_sig.l * (1.0f - er) + (fb_sig.l - _erode.l) * (er * 1.05f);
-            fb_sig.r = fb_sig.r * (1.0f - er) + (fb_sig.r - _erode.r) * (er * 1.05f);
+            fb_sig.l = fb_sig.l * _erode_g1 + (fb_sig.l - _erode.l) * _erode_g2;
+            fb_sig.r = fb_sig.r * _erode_g1 + (fb_sig.r - _erode.r) * _erode_g2;
         }
 
         // 4. OSC <-> FBK Recirculating AM Ring Mod / Stereo auto-pan
-        if (std::abs(_recirc_fm) > 0.01f) {
-            fb_sig.l *= (1.0f + osc_sig * 0.95f * _recirc_fm);
-            fb_sig.r *= (1.0f - osc_sig * 0.95f * _recirc_fm);
+        if (__builtin_expect(_recirc_active, 0)) {
+            float m = osc_sig * _cached_recirc_scale;
+            fb_sig.l *= (1.0f + m);
+            fb_sig.r *= (1.0f - m);
         }
 
         // OUT <-> FBK feedback howl
@@ -229,11 +241,16 @@ private:
     float _cross_inv{0.0f};
     float _loop_drive{1.0f};
     float _recirc_fm{0.0f};
+    float _cached_recirc_scale{0.0f};
     float _erode_amt{0.0f};
+    float _erode_g1{1.0f};
+    float _erode_g2{0.0f};
     float _larsen_howl{0.0f};
     bool  _infinite_hold{false};
     bool  _mud_decim{false};
     bool  _larsen_active{false};
+    bool  _erode_active{false};
+    bool  _recirc_active{false};
 };
 
 } // namespace bends

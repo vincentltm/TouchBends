@@ -32,7 +32,7 @@ public:
                        data.stuck_mask == 0 && data.resolution >= 16);
     }
 
-    __attribute__((always_inline)) static inline Stereo ProcessDataBus(Stereo in, const DataRegisters& data, float clock_speed = 1.0f) {
+    __attribute__((always_inline)) static inline Stereo ProcessDataBus(Stereo in, const DataRegisters& data, float clock_speed = 1.0f, bool enable_r2r = true) {
         Stereo out = in;
         if (__builtin_expect(data.stuck_mask != 0, 0)) {
             out.l = ApplyBitFracture(out.l, data.stuck_mask);
@@ -42,7 +42,7 @@ public:
             out.l = ApplyBitDepth(out.l, data.resolution);
             out.r = ApplyBitDepth(out.r, data.resolution);
         }
-        if (clock_speed < 0.95f) {
+        if (enable_r2r && clock_speed < 0.95f) {
             out.l = ApplyR2RCompand(out.l);
             out.r = ApplyR2RCompand(out.r);
         }
@@ -51,7 +51,8 @@ public:
 
     __attribute__((always_inline)) inline Stereo Process(Stereo in,
                                                          float clock_speed,
-                                                         const DataRegisters& data) {
+                                                         const DataRegisters& data,
+                                                         bool enable_r2r = true) {
         if (__builtin_expect(_can_bypass, 1)) {
             return in;
         }
@@ -73,7 +74,7 @@ public:
             out.r *= _smooth_strobe_r;
         }
 
-        return ProcessDataBus(out, data, clock_speed);
+        return ProcessDataBus(out, data, clock_speed, enable_r2r);
     }
 
 private:
@@ -81,13 +82,12 @@ private:
         float abs_x = std::abs(x);
         // Active on low-level signals (< -12 dBFS)
         if (abs_x < 1e-4f || abs_x > 0.25f) return x;
-        float sign = (x >= 0.0f) ? 1.0f : -1.0f;
         constexpr float kSteps = 2048.0f;
         constexpr float kInvSteps = 1.0f / kSteps;
         float scaled = abs_x * kSteps;
         float step_q = static_cast<float>(static_cast<int32_t>(scaled + 0.5f)) * kInvSteps;
-        float warm = 0.85f * abs_x + 0.15f * step_q;
-        return sign * warm;
+        float warm = abs_x + 0.15f * (step_q - abs_x);
+        return (x >= 0.0f) ? warm : -warm;
     }
     static inline float ApplyBitFracture(float x, uint32_t mask) {
         float abs_x = std::abs(x);
@@ -117,7 +117,8 @@ private:
         float half_steps = kHalfSteps[b];
         float inv_half_steps = kInvHalfSteps[b];
         float scaled = std::clamp(x, -1.0f, 1.0f) * half_steps;
-        float rounded = __builtin_roundf(scaled);
+        float rounded = (scaled >= 0.0f) ? static_cast<float>(static_cast<int32_t>(scaled + 0.5f))
+                                         : static_cast<float>(static_cast<int32_t>(scaled - 0.5f));
         float quant = rounded * inv_half_steps;
         // Soft floor on signals rounding to zero
         if (__builtin_expect(rounded == 0.0f && std::abs(x) > 1e-5f, 0)) {

@@ -72,8 +72,8 @@ constexpr Bend kMasterBendTable[] = {
     // Clock / Speed
     BEND_PAIR(Clk, Gnd, Slot::DlyBrake,       Sig::One,      1.00f, When::Always, Flag::NoBleed),
     BEND_PAIR(Vcc, Clk, Slot::ClkOverclock,   Sig::One,      1.00f, When::Always, Flag::None),
-    // OSC <-> CLK: Audio-rate delay clock FM (Saw/Sin) or Rungler loop modulation (Rnd)
-    BEND_PAIR(Osc, Clk, Slot::DlyClockFm,     Sig::Osc,      0.65f, When::Always, Flag::NoBleed),
+    // OSC <-> CLK: Pitch vibrato, analog tape chorus, and clock FM
+    BEND_PAIR(Osc, Clk, Slot::DlyClockFm,     Sig::One,      0.85f, When::Always, Flag::NoBleed),
     BEND_PAIR(Osc, Clk, Slot::OscRunglerLock, Sig::One,      1.00f, When::Rnd,    Flag::None),
     BEND_PAIR(Clk, Amp, Slot::AmpTremolo,     Sig::ClkPulse, 1.00f, When::Always, Flag::None),
     BEND_PAIR(Clk, Flt, Slot::FltClockStep,   Sig::ClkPulse, 0.30f, When::Always, Flag::None),

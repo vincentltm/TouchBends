@@ -164,6 +164,7 @@ public:
         if (__builtin_expect(_lim_gain < 0.999f, 0)) {
             sig.l *= _lim_gain;
             sig.r *= _lim_gain;
+            max_p *= _lim_gain;
         }
 
         // Soft-knee analog saturation
@@ -185,12 +186,12 @@ public:
         }
 
         // Power rail brownout sputter and shutdown
-        if (__builtin_expect(vcc < 0.07f, 0)) {
-            if (vcc <= 0.015f) {
+        if (__builtin_expect(vcc < 0.045f, 0)) {
+            if (vcc <= 0.008f) {
                 _sputter_gate = 0.0f;
                 _sputter_on = false;
             } else {
-                float t = (vcc - 0.015f) * (1.0f / 0.055f);
+                float t = (vcc - 0.008f) * (1.0f / 0.037f);
                 if (_sputter_timer == 0) {
                     _sputter_rng = _sputter_rng * 1664525u + 1013904223u;
                     float r = static_cast<float>(_sputter_rng & 0xFFFF) * (1.0f / 65536.0f);

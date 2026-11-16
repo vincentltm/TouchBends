@@ -93,7 +93,7 @@ public:
         v_rail_eff = std::clamp(v_rail_eff, 0.0f, 1.0f);
         clk_vcc_sag = std::clamp(clk_vcc_sag, 0.1f, 1.0f);
 
-        // Thermal drift (~0.08%, ~1.4 cents)
+        // Thermal drift (~0.08%, ~1.4 cents) and voltage curve decimation
         if ((_drift_cnt++ & 15) == 0) {
             _drift_phase += (0.38f * 16.0f) * dt;
             if (_drift_phase >= 1.0f) _drift_phase -= 1.0f;
@@ -103,6 +103,9 @@ public:
             _drift_smooth += 0.0048f * (_cached_thermal_noise - _drift_smooth);
             _cached_analog_drift = 1.0f + 0.0007f * FastSin(_drift_phase * kTwoPi) + 0.0005f * _drift_smooth;
             _cached_target_freq = std::clamp(_base_freq * clk_vcc_sag * _cached_analog_drift, 0.1f, 4000.0f);
+            _cached_osc_v_scale = (v_rail_eff > 0.05f) ? (0.75f + 0.25f * v_rail_eff) : (v_rail_eff * 15.0f);
+            _cached_starve_curve = (v_rail_eff < 0.85f) ? ((0.85f - v_rail_eff) * 1.50f) : 0.0f;
+            _cached_sat_depth = (v_rail_eff < health::kBroken) ? ((health::kBroken - v_rail_eff) * (1.0f / health::kBroken)) : 0.0f;
         }
         float thermal_noise = _cached_thermal_noise;
 
@@ -119,12 +122,12 @@ public:
             freq *= (1.0f - ch) + kPenta[_chime_idx] * ch;
         }
 
-        float total_fm = std::clamp(fm_input * 1.50f, -4.0f, 4.0f);
-        _step_tick = (_step_tick + 1) & 3;
-        if (_step_tick == 0) {
-            _cached_fm_mult = (std::abs(total_fm) > 0.001f) ? FastPow2(total_fm * 0.90f) : 1.0f;
-        }
-        if (std::abs(total_fm) > 0.001f) {
+        if (__builtin_expect(std::abs(fm_input) > 0.001f, 0)) {
+            _step_tick = (_step_tick + 1) & 3;
+            if (_step_tick == 0) {
+                float total_fm = std::clamp(fm_input * 1.35f, -3.6f, 3.6f);
+                _cached_fm_mult = FastPow2(total_fm);
+            }
             freq = std::clamp(freq * _cached_fm_mult, 0.1f, 2400.0f);
         }
 
@@ -150,7 +153,8 @@ public:
             _phase = 1.0f;
         }
 
-        _phase += freq * dt;
+        float phase_inc = freq * dt;
+        _phase += phase_inc;
         if (_phase >= 1.0f) {
             _phase -= 1.0f;
             cycle_reset = true;
@@ -231,16 +235,15 @@ public:
             _snap_env = 0.0f;
         }
 
-        float osc_v_scale = (v_rail_eff > 0.05f) ? (0.75f + 0.25f * v_rail_eff) : (v_rail_eff * 15.0f);
+        float osc_v_scale = _cached_osc_v_scale;
 
         if (mode == ModeSaw) {
             float p = _phase;
             // Exponential RC capacitor charging curve:
             // Charging current decreases as capacitor voltage rises toward comparator threshold
             float p_rc = p * (1.14f - 0.14f * p);
-            if (v_rail_eff < 0.85f) {
-                float starve_curve = (0.85f - v_rail_eff) * 1.50f;
-                p_rc = p_rc * (1.0f + starve_curve * (1.0f - p_rc));
+            if (__builtin_expect(_cached_starve_curve > 0.0f, 0)) {
+                p_rc = p_rc * (1.0f + _cached_starve_curve * (1.0f - p_rc));
             }
 
             float warp = (mods.shape_warp > 0.01f) ? std::min(1.0f, mods.shape_warp) : 0.0f;
@@ -250,12 +253,13 @@ public:
             _saw_ramp = eff_ramp;
 
             float raw_saw = (2.0f * p_rc) - 1.0f;
-            float phase_inc = freq * dt;
             if (p < phase_inc) {
-                float t = p / phase_inc;
+                float inv_phase_inc = 1.0f / phase_inc;
+                float t = p * inv_phase_inc;
                 raw_saw -= (t + t - t * t - 1.0f);
             } else if (p > 1.0f - phase_inc) {
-                float t = (p - 1.0f) / phase_inc;
+                float inv_phase_inc = 1.0f / phase_inc;
+                float t = (p - 1.0f) * inv_phase_inc;
                 raw_saw -= (t * t + t + t + 1.0f);
             }
 
@@ -264,13 +268,12 @@ public:
             raw_saw = raw_saw * morph_dir + (_snap_val * _snap_env) * morph_dir;
 
             sig = raw_saw;
-            if (v_rail_eff < health::kBroken) {
-                float s_depth = (health::kBroken - v_rail_eff) * (1.0f / health::kBroken);
-                sig = FastSoftSat(sig * (1.0f + s_depth * 1.35f));
+            if (__builtin_expect(_cached_sat_depth > 0.0f, 0)) {
+                sig = FastSoftSat(sig * (1.0f + _cached_sat_depth * 1.35f));
             }
             sig *= osc_v_scale;
         } else if (mode == ModeSin) {
-            float pm = total_fm * 0.35f;
+            float pm = fm_input * 0.50f;
             float s_raw = FastSin((_phase + pm) * kTwoPi);
 
             // Differential BJT sine shaper harmonic modeling
@@ -292,9 +295,8 @@ public:
                 float sqr = FastTanh(s * drive) * 0.95f;
                 s = s * (1.0f - warp) + sqr * warp;
             }
-            if (v_rail_eff < health::kBroken) {
-                float s_depth = (health::kBroken - v_rail_eff) * (1.0f / health::kBroken);
-                s = FastSoftSat(s * (1.0f + s_depth * 1.5f));
+            if (__builtin_expect(_cached_sat_depth > 0.0f, 0)) {
+                s = FastSoftSat(s * (1.0f + _cached_sat_depth * 1.5f));
             }
             sig = s * osc_v_scale;
             _saw_ramp = 0.0f;
@@ -378,6 +380,9 @@ private:
     uint8_t _drift_cnt{0};
     float   _cached_analog_drift{1.0f};
     float   _cached_thermal_noise{0.0f};
+    float   _cached_osc_v_scale{1.0f};
+    float   _cached_starve_curve{0.0f};
+    float   _cached_sat_depth{0.0f};
     float   _snap_val{0.0f};
     float   _snap_env{0.0f};
     float   _smooth_noise_lp1{0.0f};

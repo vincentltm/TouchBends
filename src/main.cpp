@@ -15,7 +15,7 @@ using namespace bends;
 
 static DaisySeed   hw;
 static Touch       touch;
-static Instrument  instrument;
+static Instrument DTCM_MEM_SECTION instrument;
 
 // External SDRAM stereo delay buffer (2^20 stereo frames = 21.85s @ 48kHz stereo = 8 MB in SDRAM)
 static Stereo DSY_SDRAM_BSS g_sdram_delay_buffer[tuning::kDelayFrames];

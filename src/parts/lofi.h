@@ -18,6 +18,7 @@ struct Lofi {
     float alpha{0.45f};
     float lofi_amt{0.0f};
     float whine_scale{0.0f};
+    float detent_blend{-1.0f};
     bool  active{false};
 
     void Init() {
@@ -35,6 +36,7 @@ struct Lofi {
         alpha = 0.45f;
         lofi_amt = 0.0f;
         whine_scale = 0.0f;
+        detent_blend = -1.0f;
         active = true;
     }
 
@@ -49,10 +51,12 @@ struct Lofi {
             alpha = 0.95f;
             lofi_amt = 0.0f;
             whine_scale = 0.0f;
+            detent_blend = (clock_speed < 0.99f) ? std::clamp((0.99f - clock_speed) * 20.0f, 0.0f, 1.0f) : -1.0f;
         } else {
             // Underclock intensity: 0.0 at 0.92x, ramping to 1.0 at 0.20x
             lofi_amt = std::clamp((0.92f - clock_speed) * 1.3888889f, 0.0f, 1.0f);
             whine_scale = (lofi_amt > 0.005f) ? (lofi_amt * lofi_amt * 0.0030f) : 0.0f;
+            detent_blend = (clock_speed > 0.94f) ? std::clamp((0.99f - clock_speed) * 20.0f, 0.0f, 1.0f) : -1.0f;
 
             // ADM slew rate limiting
             max_slew = 0.040f + 0.36f * (clock_speed * clock_speed);
@@ -119,10 +123,8 @@ struct Lofi {
         }
 
         // Crossfade to bypass near detent (0.94x .. 0.99x)
-        if (dynamic_speed > 0.94f && filter_bypass <= 0.01f) {
-            float blend = (0.99f - dynamic_speed) * 20.0f;
-            blend = std::clamp(blend, 0.0f, 1.0f);
-            return in + blend * (out - in);
+        if (__builtin_expect(detent_blend >= 0.0f && filter_bypass <= 0.01f, 0)) {
+            return in + detent_blend * (out - in);
         }
         return out;
     }

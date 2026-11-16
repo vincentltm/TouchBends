@@ -36,9 +36,15 @@ void Knobs::Process() {
         } else if (raw > 0.995f) {
             raw = 1.0f;
         }
-        // Hysteresis deadband: rejects ADC electrical ripple from audio output transients (~8 ADC LSBs)
-        if (std::abs(raw - _values[i]) > 0.0020f || raw == 0.0f || raw == 1.0f) {
+        float diff = raw - _values[i];
+        if (raw == 0.0f || raw == 1.0f) {
             _values[i] = raw;
+        } else if (std::abs(diff) > 0.03f) {
+            // Fast gesture: immediate responsive tracking
+            _values[i] = raw;
+        } else if (std::abs(diff) > 0.0008f) {
+            // Smooth motion tracking: eliminates staircase quantization without ADC ripple
+            _values[i] += 0.40f * diff;
         }
     }
 }

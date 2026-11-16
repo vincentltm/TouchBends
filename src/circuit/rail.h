@@ -29,7 +29,7 @@ public:
     void ProcessControl(float fader_pos, float external_load, float network_vcc_pull, float direct_gnd_short = 0.0f) {
         float u = std::clamp(Sanitize(fader_pos, 1.0f), 0.0f, 1.0f);
         // Gradual continuous multi-stage voltage taper across full slider travel (exact 0.0V at u=0)
-        _fader_vcc = (u <= 0.015f) ? 0.0f : (u * (0.45f + 0.55f * u));
+        _fader_vcc = (u <= 0.015f) ? 0.0f : (u * (0.75f + 0.25f * u));
         external_load = Sanitize(external_load, 0.0f);
         network_vcc_pull = Sanitize(network_vcc_pull, 0.0f);
         direct_gnd_short = std::clamp(Sanitize(direct_gnd_short, 0.0f), 0.0f, 1.0f);
@@ -41,7 +41,7 @@ public:
 
         // Target voltage accounts for fader, current load, and network DC pull
         float pull_effect = (network_vcc_pull < 0.0f) ? (network_vcc_pull * 0.35f) : (network_vcc_pull * 0.20f);
-        float sag = std::min(0.35f * _fader_vcc, r_internal * external_load);
+        float sag = std::min(0.20f * _fader_vcc, r_internal * external_load);
         float v_target = _fader_vcc - sag + pull_effect;
 
         // Direct VCC <-> GND battery short pulls voltage directly down to 0V
@@ -56,7 +56,7 @@ public:
             _motorboat_pulse = 0.0f;
         } else {
             // Soft min_floor allows dynamic touch-pressure rail sag in starved mode
-            float min_floor = 0.02f;
+            float min_floor = 0.010f;
             v_target = std::clamp(v_target, min_floor, 1.0f);
 
             // Low-voltage supply motorboating (relaxation oscillation under load):

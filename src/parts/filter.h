@@ -202,10 +202,13 @@ public:
         if (starve > 0.40f) {
             _cached_deadzone = 0.05f * (starve - 0.40f) * 1.6667f;
             _cached_inv_deadzone = (_cached_deadzone > 0.001f) ? (1.0f / _cached_deadzone) : 0.0f;
+            _cached_has_deadzone = (_cached_deadzone > 0.001f);
         } else {
             _cached_deadzone = 0.0f;
             _cached_inv_deadzone = 0.0f;
+            _cached_has_deadzone = false;
         }
+        _cached_band_sat_scale = 0.85f + 0.65f * starve;
 
         // Active resonance calculation:
         float res = daisysp::fclamp(touch_flt + mods.resonance, 0.0f, 1.0f) * t_res;
@@ -292,17 +295,16 @@ public:
             return;
         }
 
-        // Audio-rate cutoff calculation (sample-rate accurate, eliminates 12 kHz decimation aliasing)
-        float total_cutoff_mod = std::clamp(mods.cutoff_ramp + mods.clock_step * 1.5f, -4.0f, 4.0f);
-        float drum_punch = 1.0f + _pitch_dive * 1.85f;
-        float base = _cur_base_f * _flt_v_scale * drum_punch;
-        if (__builtin_expect(std::abs(total_cutoff_mod) > 0.001f, 0)) {
-            base *= FastPow2(total_cutoff_mod);
-        }
-
         // 24 kHz decimation for SVF coefficient pre-warping and denominator division
         _flt_decim = (_flt_decim + 1) & 3;
         if ((_flt_decim & 1) == 0) {
+            float total_cutoff_mod = std::clamp(mods.cutoff_ramp + mods.clock_step * 1.5f, -4.0f, 4.0f);
+            float drum_punch = 1.0f + _pitch_dive * 1.85f;
+            float base = _cur_base_f * _flt_v_scale * drum_punch;
+            if (__builtin_expect(std::abs(total_cutoff_mod) > 0.003f, 0)) {
+                base *= FastPow2(total_cutoff_mod);
+            }
+
             float detune_spread = touch_flt * 0.035f;
             float freq_l = std::clamp(base * (1.0f - detune_spread), 20.0f, 18000.0f);
             float g_l = std::clamp(FastTan(freq_l * _inv_sr), 0.001f, 2.5f);
@@ -396,7 +398,7 @@ public:
         }
 
         // Stereo SVF with non-linear integrator saturation
-        float band_sat_scale = 0.85f + 0.65f * starve;
+        float band_sat_scale = _cached_band_sat_scale;
         float high_l = (in_l - r2_g_l * _s1_l - _s2_l) * h_l;
         float v1_l = g_l * high_l;
         float band_l = v1_l + _s1_l;
@@ -457,10 +459,18 @@ private:
             return (x >= 0.0f) ? s : -s;
         }
 
-        float sat = (x >= 0.0f) ? (_cached_h_pos * FastSoftSat(x * _cached_inv_h_pos))
-                                : (_cached_h_neg * FastSoftSat(x * _cached_inv_h_neg));
+        float inv_h = (x >= 0.0f) ? _cached_inv_h_pos : _cached_inv_h_neg;
+        float h = (x >= 0.0f) ? _cached_h_pos : _cached_h_neg;
+        float norm = mag * inv_h;
+        float sat;
+        if (__builtin_expect(norm <= 0.15f, 1)) {
+            sat = x;
+        } else {
+            float s = h * FastSoftSat(norm);
+            sat = (x >= 0.0f) ? s : -s;
+        }
 
-        if (_cached_deadzone > 0.001f && std::abs(sat) < _cached_deadzone) {
+        if (__builtin_expect(_cached_has_deadzone && std::abs(sat) < _cached_deadzone, 0)) {
             float sgn = (sat >= 0.0f) ? 1.0f : -1.0f;
             sat = sgn * (sat * sat) * _cached_inv_deadzone;
         }
@@ -499,6 +509,8 @@ private:
     float _cached_inv_h_neg{1.0f / 1.5f};
     float _cached_deadzone{0.0f};
     float _cached_inv_deadzone{0.0f};
+    bool  _cached_has_deadzone{false};
+    float _cached_band_sat_scale{0.85f};
     float _cached_starve_t{0.0f};
     float _cached_r{0.707f};
     float _cached_min_R{0.055f};

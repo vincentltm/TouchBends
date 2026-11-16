@@ -168,7 +168,7 @@ public:
         }
 
         // 3. Zero-delay real-time lo-fi crossfade at minimum delay time (< 0.015f)
-        if (_knob_dly_held < 0.015f && !reg.time.has_loop && !reg.time.bode_active) {
+        if (__builtin_expect(_knob_dly_held < 0.015f && !reg.time.has_loop && !reg.time.bode_active, 0)) {
             float zero_amt = 1.0f - (_knob_dly_held * 66.6667f);
             raw = raw * (1.0f - zero_amt) + in * zero_amt;
         }
@@ -211,7 +211,7 @@ public:
     }
 
     __attribute__((always_inline)) inline Stereo ProcessDry(Stereo dry, const DelayRegisters& reg) {
-        return _dry_sampler.Process(dry, _cached_eff_clock, reg.data);
+        return _dry_sampler.Process(dry, _cached_eff_clock, reg.data, false);
     }
 
     float BaseSamples() const { return _base_samples; }

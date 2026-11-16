@@ -96,8 +96,8 @@ Master routing rules are defined in `src/bends/table.h` and compiled at 750 Hz b
 | **RST + DLY** | Read Reset | Instantly snaps the playback head to the current write position. | `RestartController` in `src/bends/delay_bends.h` |
 | **RST + FBK** | Subdivision Jump | Jumps delay time across musical divisions (1/4, 1/2, 3/4, 1x, 2x). | `BufferJumpController` in `src/bends/delay_bends.h` |
 | **RST + GND** | Flush Buffer | Wipes the entire delay memory clean. | `src/app/instrument.h` |
-| **VCC + CLK** | Overclock | Boosts delay clock speed up to 2x for high-pitched, compressed repeats. | `src/parts/clock.h` |
-| **OSC + CLK** | Clock FM | Modulates the delay clock at audio rate for metallic ring-mod tones and vibrato. | `src/parts/clock.h` |
+| **OSC + CLK** | Pitch Vibrato & Chorus | Modulates delay clock for vibrato, tape chorus, and audio-rate FM. | `src/graph/signal_graph.h` |
+| **OSC + DLY** | Delay Time Mod | Granular scrub (Saw), time sweep (Sin), and S&H tap hop (Rnd). | `src/graph/signal_graph.h` |
 
 ### Oscillator & Filter
 

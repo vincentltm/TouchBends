@@ -59,6 +59,8 @@ public:
             _initialized = true;
             _head_a = _target_samples;
             _head_b = _target_samples;
+            _karplus_d = _target_samples;
+            _karplus_inc = 0.0f;
             _anchor_a = _target_samples;
             _anchor_b = _target_samples;
             _active_head = 0;
@@ -97,15 +99,20 @@ public:
         }
         _was_looping = time_reg.has_loop;
 
-        // Short delay range (< 50ms): continuous slew
+        // Short delay range (< 50ms): continuous per-sample slew
         if (_target_samples < tuning::kKarplusMaxSamples && !time_reg.has_loop) {
-            _karplus_d += 0.08f * (_target_samples - _karplus_d);
-            _head_a = _karplus_d;
-            _head_b = _karplus_d;
-            _active_head = 0;
+            if (_active_head != 0) {
+                _head_a = _head_b;
+                _karplus_d = _head_a;
+                _active_head = 0;
+            }
+            _karplus_d += 0.12f * (_target_samples - _karplus_d);
+            _karplus_inc = (_karplus_d - _head_a) * (1.0f / 64.0f);
             _xfade_active = false;
             _xfade_progress = 0.0f;
         } else {
+            _karplus_inc = 0.0f;
+            _karplus_d = (_active_head == 0) ? _head_a : _head_b;
             if (_head_a < tuning::kKarplusMaxSamples && _head_b < tuning::kKarplusMaxSamples) {
                 _head_a = _karplus_d;
                 _head_b = _karplus_d;
@@ -189,8 +196,13 @@ public:
             _bode_d_phi = std::abs(_bode_speed_delta) * (1.0f / kBodeWindow);
         }
 
-        // Stereo split & skew flags
-        _has_stereo_spread = (time_reg.stereo_split > 0.005f) || (time_reg.skew > 0.5f) || (_smooth_split > 0.002f) || (_smooth_skew > 0.5f);
+        // Stereo spread smoothing and precalculation
+        _smooth_split += 0.27f * (time_reg.stereo_split - _smooth_split);
+        _smooth_skew  += 0.27f * (time_reg.skew - _smooth_skew);
+        _has_stereo_split = (_smooth_split > 0.002f);
+        _has_skew = (_smooth_skew > 0.5f);
+        _has_stereo_spread = _has_stereo_split || _has_skew;
+        _cached_haas_offset = _smooth_split * 576.0f;
     }
 
     void Jump(float target_samples, uint16_t fade_samples = tuning::kXfadeSamples, float loop_len = 0.0f) {
@@ -289,10 +301,6 @@ public:
         constexpr float kModSlew = 0.08f;
         _smooth_mod += kModSlew * (mod_offset - _smooth_mod);
 
-        // Stereo spread smoothing
-        _smooth_split += 0.005f * (time_reg.stereo_split - _smooth_split);
-        _smooth_skew  += 0.005f * (time_reg.skew - _smooth_skew);
-
         // Loop window phase advancement
         if (time_reg.has_loop) {
             float active_len = (_active_head == 0) ? _len_a : _len_b;
@@ -318,6 +326,9 @@ public:
             _head_b += step;
             if (_head_a >= kMaxDelay) _head_a -= (kMaxDelay - tuning::kMinDelaySamples);
             if (_head_b >= kMaxDelay) _head_b -= (kMaxDelay - tuning::kMinDelaySamples);
+        } else if (__builtin_expect(_karplus_inc != 0.0f, 0)) {
+            _head_a += _karplus_inc;
+            _head_b = _head_a;
         }
 
 
@@ -452,10 +463,10 @@ public:
                 float q = 1.0f - p;
                 float gain_b = p * (1.5707963f - 0.5707963f * (p * p));
                 float gain_a = q * (1.5707963f - 0.5707963f * (q * q));
-                if (gain_b < 0.002f) {
+                if (gain_b < 0.015f) {
                     float pos_a = std::clamp(_head_a + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
                     normal_out = mem.ReadDistance(pos_a);
-                } else if (gain_a < 0.002f) {
+                } else if (gain_a < 0.015f) {
                     float pos_b = std::clamp(_head_b + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
                     normal_out = mem.ReadDistance(pos_b);
                 } else {
@@ -467,17 +478,12 @@ public:
                 }
             } else {
                 float pos_base = (_active_head == 0) ? _head_a : _head_b;
-                bool has_split = (_smooth_split > 0.002f);
-                bool has_skew  = (_smooth_skew > 0.5f);
-                bool has_spread = has_split || has_skew;
-                if (__builtin_expect(!has_spread, 1)) {
+                if (__builtin_expect(!_has_stereo_spread, 1)) {
                     float pos = std::clamp(pos_base + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
                     normal_out = mem.ReadDistance(pos);
-                } else if (has_split) {
+                } else if (_has_stereo_split) {
                     float pos_l = std::clamp(pos_base + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
-                    // Stereo channel offset (up to 12ms / 576 samples)
-                    float haas_offset = _smooth_split * 576.0f;
-                    float pos_r = std::clamp(pos_base + eff_mod + haas_offset,
+                    float pos_r = std::clamp(pos_base + eff_mod + _cached_haas_offset,
                                              tuning::kMinDelaySamples, kMaxDelay);
                     normal_out = mem.ReadDistanceSplit(pos_l, pos_r);
                 } else {
@@ -503,27 +509,23 @@ public:
         if (time_reg.has_loop) {
             float active_phase = (_active_head == 0) ? _phase_a : _phase_b;
             float active_len = (_active_head == 0) ? _len_a : _len_b;
-            if (active_len > 48.0f) {
+            if (__builtin_expect(active_len > 48.0f, 1)) {
                 float seam_len = (_active_head == 0) ? _seam_len_a : _seam_len_b;
                 float inv_seam_len = (_active_head == 0) ? _inv_seam_len_a : _inv_seam_len_b;
-                if (active_phase < seam_len) {
+                if (__builtin_expect(active_phase < seam_len, 0)) {
                     float norm = std::clamp(active_phase * inv_seam_len, 0.0f, 1.0f);
                     out = out * (norm * norm * (3.0f - 2.0f * norm));
-                } else if (active_phase > (active_len - seam_len)) {
+                } else if (__builtin_expect(active_phase > (active_len - seam_len), 0)) {
                     float norm = std::clamp((active_len - active_phase) * inv_seam_len, 0.0f, 1.0f);
                     out = out * (norm * norm * (3.0f - 2.0f * norm));
                 }
             }
-        }
-
-        // Smooth crossfade back to live audio when unfreezing
-        if (!time_reg.has_loop && _unfreeze_xfade > 0.001f) {
-            out = out * (1.0f - _unfreeze_xfade) + _unfreeze_last * _unfreeze_xfade;
-            _unfreeze_xfade *= 0.96f;
-        }
-        if (time_reg.has_loop) {
             _unfreeze_last = out;
             _unfreeze_xfade = 1.0f;
+        } else if (__builtin_expect(_unfreeze_xfade > 0.001f, 0)) {
+            // Smooth crossfade back to live audio when unfreezing
+            out = out * (1.0f - _unfreeze_xfade) + _unfreeze_last * _unfreeze_xfade;
+            _unfreeze_xfade *= 0.96f;
         }
 
         return out;
@@ -537,6 +539,8 @@ public:
 
     inline bool IsXfadeActive() const { return _xfade_active; }
     inline float XfadeProgress() const { return _xfade_progress; }
+    inline float HeadA() const { return _head_a; }
+    inline float HeadB() const { return _head_b; }
 
 private:
     float    _head_a{tuning::kMinDelaySamples};
@@ -574,10 +578,12 @@ private:
     bool     _has_stereo_split{false};
     bool     _has_skew{false};
     bool     _has_stereo_spread{false};
+    float    _cached_haas_offset{0.0f};
     float    _split_ratio{1.0f};
     float    _split_offset{0.0f};
     bool     _initialized{false};
     float    _karplus_d{tuning::kMinDelaySamples};
+    float    _karplus_inc{0.0f};
     bool     _pending_jump{false};
     float    _pending_jump_tgt{0.0f};
     uint16_t _pending_jump_fade{tuning::kXfadeSamples};

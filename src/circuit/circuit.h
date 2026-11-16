@@ -163,6 +163,7 @@ public:
                              _bend_engine.Amounts().Get(Slot::DlyHeadMod) > 0.008f ||
                              state.pressures[NodeOsc] > 0.015f ||
                              state.g_osc_clk > 0.008f));
+        dctx.osc_mode = state.osc_mode;
         dctx.osc_freq = osc_freq;
         dctx.osc_phase = osc_phase;
         dctx.osc_rnd_step = osc_rnd_step;

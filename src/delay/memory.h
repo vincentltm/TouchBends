@@ -139,13 +139,13 @@ public:
 
     __attribute__((always_inline)) inline void Overdub(float abs_pos, Stereo s, float decay = 0.55f, float rot_depth = 0.0f) {
         if (!_buffer || _clearing) return;
-        s.l = std::clamp(s.l, -4.0f, 4.0f);
-        s.r = std::clamp(s.r, -4.0f, 4.0f);
+        s.l = daisysp::fclamp(s.l, -4.0f, 4.0f);
+        s.r = daisysp::fclamp(s.r, -4.0f, 4.0f);
         uint32_t idx = static_cast<uint32_t>(static_cast<int32_t>(abs_pos)) & kMask;
         Stereo old = _buffer[idx];
 
         // Low-voltage bit corruption & charge leakage during recirculation
-        if (rot_depth > 0.02f) {
+        if (__builtin_expect(rot_depth > 0.02f, 0)) {
             float leak = 1.0f - (rot_depth * 0.00025f);
             old.l *= leak;
             old.r *= leak;
@@ -164,11 +164,12 @@ public:
         }
 
         // Constant-energy soft-saturated overdub mix:
-        float in_g = 0.45f;
-        float old_g = decay;
+        constexpr float in_g = 0.45f;
+        float mix_l = s.l * in_g + old.l * decay;
+        float mix_r = s.r * in_g + old.r * decay;
         _buffer[idx] = {
-            FastSoftSat(s.l * in_g + old.l * old_g),
-            FastSoftSat(s.r * in_g + old.r * old_g)
+            FastSoftSat(mix_l),
+            FastSoftSat(mix_r)
         };
     }
 

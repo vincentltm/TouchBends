@@ -120,6 +120,12 @@ public:
 
         float rail_vol = (v_eff <= 0.015f) ? 0.0f : (0.55f + 0.45f * v_eff);
         _cached_master_vol = _vol * rail_vol;
+
+        _cached_has_slew = (_cached_max_slew < 1.0f);
+        _cached_has_sputter = (_cached_sputter_th > 0.001f);
+        _cached_has_crank = (_crank > 0.01f);
+        _cached_pre_alpha = 1.0f - _crank * 0.35f;
+        _cached_spk_alpha = 1.0f - _crank * 0.55f;
     }
 
     __attribute__((always_inline)) inline void Process(float in_l, float in_r,
@@ -161,10 +167,9 @@ public:
         // Analog pre-gain conditioning: gently rolls off supersonic/digital hash (>6 kHz) before 32x drive
         float proc_in_l = in_l;
         float proc_in_r = in_r;
-        if (__builtin_expect(_crank > 0.01f, 0)) {
-            float pre_alpha = 1.0f - _crank * 0.35f;
-            _pre_tight_l += pre_alpha * (proc_in_l - _pre_tight_l);
-            _pre_tight_r += pre_alpha * (proc_in_r - _pre_tight_r);
+        if (__builtin_expect(_cached_has_crank, 0)) {
+            _pre_tight_l += _cached_pre_alpha * (proc_in_l - _pre_tight_l);
+            _pre_tight_r += _cached_pre_alpha * (proc_in_r - _pre_tight_r);
             proc_in_l = _pre_tight_l;
             proc_in_r = _pre_tight_r;
         } else {
@@ -172,19 +177,21 @@ public:
             _pre_tight_r = proc_in_r;
         }
 
-        // Supply voltage sag and compression envelope
-        float in_peak = std::max(std::abs(proc_in_l), std::abs(proc_in_r)) * (_cached_drive_eff * 0.08f);
-        if (in_peak > _sag_env) {
-            _sag_env += 0.05f * (in_peak - _sag_env); // fast attack ~0.4ms
-        } else {
-            _sag_env += 0.00015f * (in_peak - _sag_env); // slow release ~140ms
-        }
+        // Supply voltage sag and compression envelope (evaluated at 24 kHz)
         _sag_comp_cnt = (_sag_comp_cnt + 1) & 3;
-        if (_sag_comp_cnt == 0) {
-            _cached_sag_comp = (_crank > 0.01f) ? (1.0f / (1.0f + _crank * 0.35f * std::min(2.0f, _sag_env))) : 1.0f;
-            float d_mod = std::min(mods.drive, 3.6f);
-            float raw_eff = (_cached_drive_eff + d_mod * 2.8f * _cached_starve_boost) * _cached_sag_comp;
-            _cached_eff_drive = std::min(raw_eff, 24.0f);
+        if ((_sag_comp_cnt & 1) == 0) {
+            float in_peak = std::max(std::abs(proc_in_l), std::abs(proc_in_r)) * (_cached_drive_eff * 0.08f);
+            if (in_peak > _sag_env) {
+                _sag_env += 0.10f * (in_peak - _sag_env); // fast attack ~0.4ms
+            } else {
+                _sag_env += 0.00030f * (in_peak - _sag_env); // slow release ~140ms
+            }
+            if (_sag_comp_cnt == 0) {
+                _cached_sag_comp = _cached_has_crank ? (1.0f / (1.0f + _crank * 0.35f * std::min(2.0f, _sag_env))) : 1.0f;
+                float d_mod = std::min(mods.drive, 3.6f);
+                float raw_eff = (_cached_drive_eff + d_mod * 2.8f * _cached_starve_boost) * _cached_sag_comp;
+                _cached_eff_drive = std::min(raw_eff, 24.0f);
+            }
         }
         float eff_drive = _cached_eff_drive;
 
@@ -193,20 +200,22 @@ public:
         _smooth_master_vol += 0.04f * (master_vol - _smooth_master_vol);
 
         float common_bias = hum_inject * _vol + mods.bias * 0.15f;
+        float osc_in_l = osc_ac_l * 0.85f;
+        float osc_in_r = osc_ac_r * 0.85f;
+        float eff_out_vol = _cached_comp * _smooth_master_vol;
         out_l = ProcessChannel(proc_in_l, _dc_block_l, _slew_l, blend_rm, rm_carrier_l,
-                               osc_ac_l, common_bias,
-                               _smooth_drive_eff, _smooth_master_vol);
+                               osc_in_l, common_bias,
+                               _smooth_drive_eff, eff_out_vol);
         out_r = ProcessChannel(proc_in_r, _dc_block_r, _slew_r, blend_rm, rm_carrier_r,
-                               osc_ac_r, common_bias,
-                               _smooth_drive_eff, _smooth_master_vol);
+                               osc_in_r, common_bias,
+                               _smooth_drive_eff, eff_out_vol);
 
         // 2-pole lowpass roll-off (12 dB/oct above 4.5 kHz at high drive)
-        if (__builtin_expect(_crank > 0.01f, 0)) {
-            float spk_alpha = 1.0f - _crank * 0.55f;
-            _spk1_l += spk_alpha * (out_l - _spk1_l);
-            _spk2_l += spk_alpha * (_spk1_l - _spk2_l);
-            _spk1_r += spk_alpha * (out_r - _spk1_r);
-            _spk2_r += spk_alpha * (_spk1_r - _spk2_r);
+        if (__builtin_expect(_cached_has_crank, 0)) {
+            _spk1_l += _cached_spk_alpha * (out_l - _spk1_l);
+            _spk2_l += _cached_spk_alpha * (_spk1_l - _spk2_l);
+            _spk1_r += _cached_spk_alpha * (out_r - _spk1_r);
+            _spk2_r += _cached_spk_alpha * (_spk1_r - _spk2_r);
             out_l = _spk2_l;
             out_r = _spk2_r;
         } else {
@@ -222,47 +231,61 @@ private:
     __attribute__((always_inline)) inline float ProcessChannel(
         float ext_in, DcBlocker& dc_block, float& slew_state,
         float blend_rm, float rm_carrier,
-        float osc_inject, float common_bias,
-        float drive_eff, float master_vol) {
+        float osc_in, float common_bias,
+        float drive_eff, float eff_out_vol) {
         float dry = ext_in;
         float amp_core = dry;
-        if (blend_rm > 0.015f && std::abs(dry) > 0.01f) {
+        if (__builtin_expect(blend_rm > 0.015f && std::abs(dry) > 0.01f, 0)) {
             amp_core = dry * (1.0f - blend_rm + blend_rm * rm_carrier * 1.6f);
         }
 
         // Bridged oscillator injection and transistor DC bias offset enter the saturating preamp core
-        float osc_in = osc_inject * 0.85f;
         float amp_in = amp_core + osc_in + common_bias;
 
         // Apply drive
         float scaled_in = amp_in * drive_eff;
 
         // Slew-rate limiting (op-amp bandwidth collapse under starvation)
-        float slew_delta = scaled_in - slew_state;
-        slew_delta = std::clamp(slew_delta, -_cached_max_slew, _cached_max_slew);
-        slew_state += slew_delta;
-        slew_state = std::clamp(slew_state, -6.0f, 6.0f);
-        float in_proc = slew_state;
+        float in_proc;
+        if (__builtin_expect(_cached_has_slew, 0)) {
+            float slew_delta = std::clamp(scaled_in - slew_state, -_cached_max_slew, _cached_max_slew);
+            slew_state += slew_delta;
+            in_proc = slew_state;
+        } else {
+            slew_state = scaled_in;
+            in_proc = scaled_in;
+        }
+
+        float mag = std::abs(in_proc);
 
         // Crossover deadzone below 0.20V
-        if (_cached_sputter_th > 0.001f) {
-            float abs_val = std::abs(in_proc);
-            if (abs_val < _cached_sputter_th) {
-                float ratio = abs_val * _cached_inv_sputter_th;
-                in_proc *= (ratio * ratio);
+        if (__builtin_expect(_cached_has_sputter, 0)) {
+            if (__builtin_expect(mag < _cached_sputter_th, 0)) {
+                float ratio = mag * _cached_inv_sputter_th;
+                float sputter_gain = ratio * ratio;
+                in_proc *= sputter_gain;
+                mag *= sputter_gain;
             }
         }
 
         // Asymmetric soft saturation
-        bool is_pos = (in_proc >= 0.0f);
-        float knee = is_pos ? _cached_p_knee : _cached_n_knee;
-        float span = is_pos ? _cached_p_span : _cached_n_span;
-        float inv_span = is_pos ? _cached_inv_p_span : _cached_inv_n_span;
-        float mag = std::abs(in_proc);
-        float sat = (mag <= knee) ? mag : (knee + span * FastSoftSat((mag - knee) * inv_span));
-        if (!is_pos) sat = -sat;
+        float sat;
+        if (in_proc >= 0.0f) {
+            if (__builtin_expect(in_proc <= _cached_p_knee, 1)) {
+                sat = in_proc;
+            } else {
+                sat = _cached_p_knee + _cached_p_span * FastSoftSat((in_proc - _cached_p_knee) * _cached_inv_p_span);
+            }
+        } else {
+            float neg = -in_proc;
+            if (__builtin_expect(neg <= _cached_n_knee, 1)) {
+                sat = in_proc;
+            } else {
+                sat = -(_cached_n_knee + _cached_n_span * FastSoftSat((neg - _cached_n_knee) * _cached_inv_n_span));
+            }
+        }
 
-        float out = sat * _cached_comp * master_vol;
+        float out = sat * eff_out_vol;
         return dc_block.Process(out);
     }
 
@@ -308,6 +331,11 @@ private:
     uint8_t _sag_comp_cnt{0};
     float _cached_sag_comp{1.0f};
     float _cached_eff_drive{1.0f};
+    float _cached_pre_alpha{0.95f};
+    float _cached_spk_alpha{0.95f};
+    bool _cached_has_slew{false};
+    bool _cached_has_sputter{false};
+    bool _cached_has_crank{false};
 };
 
 } // namespace bends

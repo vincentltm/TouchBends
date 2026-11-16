@@ -47,9 +47,12 @@ class HealthController {
 public:
     void Reset() {
         _rng = 0xDEADBEEFu;
-        _ghost_timer = 2400;
-        _ghost_duration = 0;
-        _ghost_active = false;
+        _sneak_timer = 2400;
+        _sneak_duration = 0;
+        _sneak_active = false;
+        _sneak_speed = 1.0f;
+        _sneak_slice_len = 4800.0f;
+        _prev_beat = false;
     }
 
     void Update(DelayRegisters& reg, const DelayContext& ctx) {
@@ -78,44 +81,88 @@ public:
             reg.data.stuck_mask = sticky_mask;
         }
 
-        // Unstable address slips under low rail voltage (< 0.35V)
-        if (ctx.vcc < 0.35f) {
+        // Low-voltage sneak glitch: sporadic beat repeat or reverse hiccup (< 0.32V)
+        if (ctx.vcc < 0.32f && !reg.time.is_chop && !ctx.is_frozen) {
             _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
 
-            if (_ghost_active) {
-                if (_ghost_duration > 0) {
-                    _ghost_duration--;
+            bool beat_edge = ctx.clk_beat && !_prev_beat;
+            _prev_beat = ctx.clk_beat;
+
+            if (_sneak_active) {
+                if (_sneak_duration > 0) {
+                    _sneak_duration--;
+                    reg.time.has_loop = true;
+                    reg.write.write_enable = false;
+                    reg.time.loop_len = _sneak_slice_len;
+                    reg.speed.speed = _sneak_speed;
+                    reg.speed.slew = 0.50f;
+                    reg.feedback.gain = std::max(reg.feedback.gain, 0.82f);
                 } else {
-                    _ghost_active = false;
-                    reg.time.RequestJump(reg.time.offset, 128);
+                    _sneak_active = false;
+                    _sneak_timer = static_cast<uint16_t>(3000 + (_rng % 4500));
+                    if (!ctx.is_frozen) {
+                        reg.time.has_loop = false;
+                        reg.write.write_enable = true;
+                        reg.speed.speed = 1.0f;
+                        reg.time.RequestJump(reg.time.offset, 384);
+                    }
                 }
             } else {
-                if (_ghost_timer > 0) {
-                    _ghost_timer--;
-                } else {
-                    _ghost_timer = static_cast<uint16_t>(2600 + (_rng % 3800));
-
-                    if ((ctx.in_env > 0.02f || ctx.is_frozen) && !reg.time.jump_req) {
-                        _ghost_active = true;
-                        _ghost_duration = static_cast<uint16_t>(100 + (_rng % 150));
-                        float ghost_delta = 72000.0f + static_cast<float>(_rng % 96000);
-                        float ghost_target = std::clamp(reg.time.offset + ghost_delta,
-                                                        tuning::kMinDelaySamples,
-                                                        static_cast<float>(tuning::kDelayFrames - 4800));
-                        reg.time.RequestJump(ghost_target, 128);
+                bool trigger = false;
+                if (_sneak_timer > 0) {
+                    _sneak_timer--;
+                    // When close to trigger, allow a clock beat to synchronize the hiccup
+                    if (beat_edge && _sneak_timer < 600 && ((_rng & 0x07) == 0)) {
+                        trigger = true;
                     }
+                } else {
+                    trigger = true;
+                }
+
+                if (trigger && !reg.time.jump_req) {
+                    _sneak_active = true;
+                    _sneak_duration = static_cast<uint16_t>(120 + (_rng % 140)); // ~160 to 350ms
+                    _sneak_timer = static_cast<uint16_t>(3200 + (_rng % 4000));
+
+                    // Derive musical slice length from clk_rate
+                    float clk_hz = std::clamp(ctx.clk_rate, 0.25f, 40.0f);
+                    float beat_samples = 48000.0f / clk_hz;
+                    while (beat_samples > 12000.0f) beat_samples *= 0.5f;
+                    while (beat_samples < 3000.0f)  beat_samples *= 2.0f;
+                    _sneak_slice_len = beat_samples;
+
+                    // 50% chance reverse playback, 50% chance forward repeat / octave drop
+                    if ((_rng & 1) != 0) {
+                        _sneak_speed = -1.0f; // Reverse glitch
+                    } else {
+                        _sneak_speed = ((_rng & 2) != 0) ? 0.5f : 1.0f; // Forward repeat / half-speed
+                    }
+
+                    reg.time.has_loop = true;
+                    reg.write.write_enable = false;
+                    reg.time.loop_len = _sneak_slice_len;
+                    reg.speed.speed = _sneak_speed;
+                    reg.speed.slew = 0.50f;
+                    reg.feedback.gain = std::max(reg.feedback.gain, 0.82f);
+                    reg.time.RequestJump(reg.time.offset, 256, _sneak_slice_len);
                 }
             }
         } else {
-            if (_ghost_active) {
-                _ghost_active = false;
-                reg.time.RequestJump(reg.time.offset, 128);
+            _prev_beat = ctx.clk_beat;
+            if (_sneak_active) {
+                _sneak_active = false;
+                if (!ctx.is_frozen) {
+                    reg.time.has_loop = false;
+                    reg.write.write_enable = true;
+                    reg.speed.speed = 1.0f;
+                    reg.time.RequestJump(reg.time.offset, 384);
+                }
             }
-            _ghost_timer = 2400;
+            _sneak_timer = 2400;
         }
 
-        // Complete brownout shutdown below 0.015V
-        if (ctx.vcc < 0.015f) {
+        // Complete brownout shutdown below 0.010V
+        if (ctx.vcc < 0.010f) {
             reg.clock.run = false;
             reg.write.write_enable = false;
         }
@@ -123,9 +170,12 @@ public:
 
 private:
     uint32_t _rng{0xDEADBEEFu};
-    uint16_t _ghost_timer{2400};
-    uint16_t _ghost_duration{0};
-    bool     _ghost_active{false};
+    uint16_t _sneak_timer{2400};
+    uint16_t _sneak_duration{0};
+    bool     _sneak_active{false};
+    float    _sneak_speed{1.0f};
+    float    _sneak_slice_len{4800.0f};
+    bool     _prev_beat{false};
 };
 
 // =============================================================================
@@ -281,6 +331,9 @@ class ChopController {
 public:
     void Reset() {
         _active = false;
+        _is_looping = false;
+        _clk_trig_accum = 0.0f;
+        _repeats_left = 0;
         _beat_latched = false;
         _pendulum_rev = false;
         _beat_counter = 0;
@@ -288,103 +341,206 @@ public:
         _retrigger_timer = 0;
         _prev_phase = 0.0f;
         _smooth_amount = 0.0f;
-        _current_div = 2.0f;
+        _sine_speed = 1.0f;
+        _rnd_speed = 1.0f;
+        _rng = 0x82A1B3C4u;
     }
 
     void Update(float amount, DelayRegisters& reg, const DelayContext& ctx) {
         if (amount > 0.008f) {
             // Pressure smoothing
             _smooth_amount += 0.08f * (amount - _smooth_amount);
+            float prob = daisysp::fclamp((_smooth_amount - 0.04f) * (1.0f / 0.76f), 0.0f, 1.0f);
 
-            reg.time.has_loop = true;
-            reg.write.write_enable = false;
+            bool is_osc_stutter = ctx.osc_stutter || ctx.pendulum_slice;
+            float slice_len;
+            float target_speed = 1.0f;
 
-            // Onset: capture anchor at current delay playback position
+            if (!is_osc_stutter) {
+                // -------------------------------------------------------------
+                // Standard CLK + DLY: Clean, clock-synced repeats at 1x forward
+                // -------------------------------------------------------------
+                target_speed = 1.0f;
+
+                // Derive fixed clock-synced slice length from ctx.clk_rate
+                float clk_hz = std::clamp(ctx.clk_rate, 0.25f, 40.0f);
+                float beat_samples = 48000.0f / clk_hz;
+
+                // Bring into musical subdivision range (2500 .. 10000 samples)
+                while (beat_samples > 10000.0f) beat_samples *= 0.5f;
+                while (beat_samples < 2500.0f)  beat_samples *= 2.0f;
+
+                // Firm pressure provides a tight ratchet/subdivision (not overly sensitive)
+                if (_smooth_amount >= 0.78f) {
+                    slice_len = beat_samples * 0.5f;
+                } else {
+                    slice_len = beat_samples;
+                }
+            } else {
+                // -------------------------------------------------------------
+                // 3-Pad OSC + CLK + DLY: Multi-Mode Chop based on Switch A
+                // -------------------------------------------------------------
+                // OSC Speed drives chop slice length (with musical octave-folding)
+                float osc_f = ctx.osc_freq;
+                while (osc_f > 20.0f) osc_f *= 0.5f;
+                while (osc_f < 1.25f) osc_f *= 2.0f;
+                slice_len = 48000.0f / osc_f;
+
+                // Mode-specific behavior:
+                if (ctx.osc_mode == 1) { // ModeSaw (Switch A Center)
+                    // Reverse playback / pendulum
+                    if (_smooth_amount > 0.70f) {
+                        target_speed = -1.0f; // Firm pressure locks continuous reverse
+                    } else {
+                        target_speed = _pendulum_rev ? -1.0f : 1.0f; // Alternating pendulum on triggers
+                    }
+                } else if (ctx.osc_mode == 0) { // ModeSin (Switch A Up)
+                    // Clean repeats + musical octave variations
+                    if (_smooth_amount >= 0.75f) {
+                        target_speed = _sine_speed; // Octave up or down on triggers
+                    } else if (_smooth_amount >= 0.45f) {
+                        target_speed = 1.009f; // Subtle tape drift wow (+15 cents)
+                    } else {
+                        target_speed = 1.0f; // Pure unison repeat
+                    }
+                } else { // ModeRnd (Switch A Down)
+                    // Chaotic slicing with 45_bends speed zones
+                    // Loops < 2000 samples are locked to +/-1.0f to keep them clean
+                    if (slice_len < 2000.0f) {
+                        target_speed = (_rnd_speed < 0.0f) ? -1.0f : 1.0f;
+                    } else {
+                        target_speed = _rnd_speed;
+                    }
+                }
+            }
+
+            // Bounded slice length
+            slice_len = std::clamp(slice_len, 750.0f, 16000.0f);
+
+            // Onset: immediate capture on first touch contact
             if (!_active) {
                 _active = true;
+                _is_looping = true;
                 _stutter_anchor = reg.time.offset;
                 _beat_counter = 0;
                 _retrigger_timer = 0;
-                _current_div = 2.0f;
+                _clk_trig_accum = 0.0f;
+                _repeats_left = (prob >= 0.85f) ? 999 : (1 + static_cast<int>(prob * 3.0f));
                 _pendulum_rev = false;
-            } else {
-                // Interactive freeze scrubbing via S34 Delay knob while holding CLK + DLY
+                _sine_speed = 1.0f;
+                _rnd_speed = 1.0f;
+                reg.time.RequestJump(_stutter_anchor, 256, slice_len);
+            } else if (_is_looping) {
+                // Interactive freeze scrubbing via S34 Delay knob while looping
                 float scrub_target = reg.time.offset;
                 _stutter_anchor += 0.15f * (scrub_target - _stutter_anchor);
             }
 
-            // Slicing window decoupled from playback speed
-            constexpr float kBaseGlitchSamples = 6000.0f; // 125 ms @ 48 kHz
-            constexpr float kMinGlitchSamples  = 750.0f;  // ~15.6 ms audio-rate roll
-            constexpr float kMaxGlitchSamples  = 16000.0f; // ~333 ms
-            float slice_len;
-
-            bool is_pendulum = ctx.osc_stutter || ctx.pendulum_slice;
-
-            if (is_pendulum) {
-                // OSC + CLK + DLY: Alternating playback direction on triggers
-                float clk_hz = std::clamp(ctx.clk_rate, 1.5f, 5.5f);
-                slice_len = 48000.0f / clk_hz;
-            } else {
-                // Standard CLK + DLY: Division steps with hysteresis
-                if (_current_div >= 8.0f) {
-                    if (_smooth_amount < 0.78f) _current_div = 4.0f;
-                } else if (_current_div >= 4.0f) {
-                    if (_smooth_amount >= 0.88f) _current_div = 8.0f;
-                    else if (_smooth_amount < 0.55f) _current_div = 2.0f;
-                } else {
-                    if (_smooth_amount >= 0.65f) _current_div = 4.0f;
-                }
-                slice_len = kBaseGlitchSamples / _current_div;
-            }
-
-            // Clamp slice length
-            slice_len = std::clamp(slice_len, kMinGlitchSamples, kMaxGlitchSamples);
-            reg.time.loop_len = slice_len;
-            reg.time.loop_anchor = static_cast<uint32_t>(_stutter_anchor);
-
-            // Playback speed modulation
-            float brake_scale = (ctx.brake_amount > 0.02f) ? std::max(0.0f, 1.0f - ctx.brake_amount) : 1.0f;
-            float dir = (reg.speed.speed < -0.01f) ? -1.0f : 1.0f;
-            if (is_pendulum && _pendulum_rev) {
-                dir = -dir;
-            }
-            reg.speed.speed = dir * brake_scale;
-            reg.speed.slew = 0.50f;
-
-            // Sustain stutter repeats without fading
-            reg.feedback.gain = std::max(reg.feedback.gain, 0.85f);
-
-            // Triggering logic with rate limiting:
+            // Triggering logic with clock-accumulated probability & rate limiting:
             if (_retrigger_timer > 0) _retrigger_timer--;
 
-            bool trigger_beat = ctx.clk_beat && (_retrigger_timer == 0);
+            bool is_beat = ctx.clk_beat && (_retrigger_timer == 0);
             _prev_phase = ctx.osc_phase;
 
-            if (trigger_beat && !_beat_latched) {
+            if (is_beat && !_beat_latched) {
                 _beat_latched = true;
                 _beat_counter++;
-                _retrigger_timer = 9; // ~12ms minimum cooldown at 750Hz block rate
-                if (is_pendulum) {
-                    _pendulum_rev = !_pendulum_rev;
+                _retrigger_timer = 9; // ~12ms cooldown at 750Hz block rate
+
+                bool trigger = false;
+                if (prob >= 0.85f) {
+                    // Firm/hard pressure: 100% deterministic retrigger on every beat
+                    trigger = true;
+                    _is_looping = true;
+                    _repeats_left = 999;
                 } else {
-                    constexpr float max_limit = static_cast<float>(tuning::kDelayFrames - 2);
-                    float step_offset = std::clamp(_stutter_anchor + static_cast<float>(_beat_counter % 8) * (slice_len * 0.5f),
-                                                   tuning::kMinDelaySamples, max_limit);
-                    reg.time.RequestJump(step_offset, 256, slice_len);
+                    // Clock-accumulated probability: accumulates on each beat
+                    // At 25% prob -> triggers every 4th beat. At 50% prob -> triggers every 2nd beat.
+                    _clk_trig_accum += prob;
+                    if (_clk_trig_accum >= 1.0f) {
+                        trigger = true;
+                        _clk_trig_accum -= 1.0f;
+                        if (_clk_trig_accum > 1.0f) _clk_trig_accum = 0.0f;
+                        _is_looping = true;
+                        _repeats_left = 1 + static_cast<int>(prob * 3.0f);
+                        _stutter_anchor = reg.time.offset;
+                    } else if (_is_looping) {
+                        if (_repeats_left > 0) {
+                            _repeats_left--;
+                        } else {
+                            // Gracefully release loop back to live delay audio
+                            _is_looping = false;
+                            reg.time.RequestJump(reg.time.offset, 384);
+                        }
+                    }
+                }
+
+                if (trigger) {
+                    if (is_osc_stutter) {
+                        if (ctx.osc_mode == 1) { // ModeSaw
+                            _pendulum_rev = !_pendulum_rev;
+                        } else if (ctx.osc_mode == 0) { // ModeSin
+                            // Cycle between musical octave steps {1.0x, 2.0x, 1.0x, 0.5x}
+                            static constexpr float kSineOctaves[4] = { 1.0f, 2.0f, 1.0f, 0.5f };
+                            _sine_speed = kSineOctaves[_beat_counter % 4];
+                        } else { // ModeRnd
+                            // Roll random speed from 45_bends tonal set
+                            _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
+                            static constexpr float kRndSpeeds[5] = { 1.0f, -1.0f, 0.5f, -0.5f, 2.0f };
+                            _rnd_speed = kRndSpeeds[(_rng >> 3) % 5];
+
+                            // CD-skip laser anchor slip
+                            constexpr float max_limit = static_cast<float>(tuning::kDelayFrames - 4800);
+                            float slip = ((_rng & 1) ? 1024.0f : -1024.0f);
+                            _stutter_anchor = std::clamp(_stutter_anchor + slip,
+                                                         tuning::kMinDelaySamples,
+                                                         max_limit);
+                        }
+                        reg.time.RequestJump(_stutter_anchor, 256, slice_len);
+                    } else {
+                        // Standard CLK + DLY: clean phrase ratcheting without pitch jump
+                        constexpr float max_limit = static_cast<float>(tuning::kDelayFrames - 2);
+                        float step_offset = std::clamp(_stutter_anchor + static_cast<float>(_beat_counter % 8) * (slice_len * 0.5f),
+                                                       tuning::kMinDelaySamples, max_limit);
+                        reg.time.RequestJump(step_offset, 256, slice_len);
+                    }
                 }
             } else if (!ctx.clk_beat) {
                 _beat_latched = false;
             }
+
+            if (_is_looping) {
+                reg.time.has_loop = true;
+                reg.write.write_enable = false;
+                reg.time.loop_len = slice_len;
+                reg.time.loop_anchor = static_cast<uint32_t>(_stutter_anchor);
+
+                // Playback speed & brake
+                float brake_scale = (ctx.brake_amount > 0.02f) ? std::max(0.0f, 1.0f - ctx.brake_amount) : 1.0f;
+                reg.speed.speed = target_speed * brake_scale;
+                reg.speed.slew = 0.50f;
+
+                // Sustain stutter repeats without fading
+                reg.feedback.gain = std::max(reg.feedback.gain, 0.85f);
+            } else {
+                if (!ctx.is_frozen) {
+                    reg.time.has_loop = false;
+                    reg.write.write_enable = true;
+                }
+            }
         } else {
             if (_active) {
                 _active = false;
+                _is_looping = false;
                 _beat_latched = false;
                 _pendulum_rev = false;
                 _beat_counter = 0;
                 _retrigger_timer = 0;
                 _smooth_amount = 0.0f;
-                _current_div = 2.0f;
+                _clk_trig_accum = 0.0f;
+                _repeats_left = 0;
+                _sine_speed = 1.0f;
+                _rnd_speed = 1.0f;
                 reg.time.loop_anchor = 0;
                 if (!ctx.is_frozen) {
                     reg.time.has_loop = false;
@@ -401,6 +557,9 @@ public:
 
 private:
     bool     _active{false};
+    bool     _is_looping{false};
+    float    _clk_trig_accum{0.0f};
+    int      _repeats_left{0};
     bool     _beat_latched{false};
     bool     _pendulum_rev{false};
     uint16_t _beat_counter{0};
@@ -408,7 +567,9 @@ private:
     float    _stutter_anchor{0.0f};
     float    _prev_phase{0.0f};
     float    _smooth_amount{0.0f};
-    float    _current_div{2.0f};
+    float    _sine_speed{1.0f};
+    float    _rnd_speed{1.0f};
+    uint32_t _rng{0x82A1B3C4u};
 };
 
 // =============================================================================
@@ -562,7 +723,7 @@ public:
             }
             reg.time.loop_len = _smooth_len;
 
-            // Buffer address ratcheting:
+            // Buffer address ratcheting with CD-skip laser slip:
             _repeat_cnt++;
             uint16_t blocks_per_repeat = static_cast<uint16_t>(_smooth_len * (1.0f / 64.0f));
             if (blocks_per_repeat < 8) blocks_per_repeat = 8;
@@ -572,13 +733,17 @@ public:
                 _target_repeats = 2 + (_rng % 4); // 2 to 5 loop repeats
 
                 float jump_delta = ((_rng & 1) ? 1.5f : -1.25f) * _smooth_len;
+                // Add CD laser skip slip (+/-1024 samples) under firm touch
+                if (_smooth_amount > 0.35f) {
+                    jump_delta += ((_rng & 2) ? 1024.0f : -1024.0f);
+                }
                 float target_offset = std::clamp(reg.time.offset + jump_delta,
                                                  tuning::kMinDelaySamples,
                                                  static_cast<float>(tuning::kDelayFrames - 4800));
                 reg.time.RequestJump(target_offset, 256, _smooth_len);
             }
 
-            // Intermittent contact attenuation:
+            // Intermittent contact attenuation and cautious low-bit fracture:
             _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
             uint16_t sputter_roll = _rng & 0x7FFu;
 
@@ -587,11 +752,17 @@ public:
                 // Contact attenuation during burst
                 reg.data.strobe_l = 0.85f;
                 reg.data.strobe_r = 0.85f;
-                reg.data.stuck_mask = 0;
+                // Cautious low-bit XOR fracture (only bits 1..4: 0x001E)
+                reg.data.stuck_mask = 0x001Eu | ((_rng & 3) << 2);
             } else {
                 reg.data.strobe_l = 1.0f;
                 reg.data.strobe_r = 1.0f;
-                reg.data.stuck_mask = 0;
+                // Subtle static fracture when pressed firmly (> 0.50)
+                if (_smooth_amount > 0.50f) {
+                    reg.data.stuck_mask = 0x000Cu; // subtle fracture on bits 2,3
+                } else {
+                    reg.data.stuck_mask = 0;
+                }
 
                 // Probability of sputter dip scales gently with touch firmness
                 uint16_t threshold = static_cast<uint16_t>(100.0f * _smooth_amount);
@@ -611,8 +782,8 @@ public:
             // High-frequency damping
             reg.feedback.damp = std::clamp(reg.feedback.damp + 0.20f + _smooth_amount * 0.45f, 0.0f, 0.95f);
 
-            // Feedback headroom limit
-            reg.feedback.gain = std::min(reg.feedback.gain, 0.85f);
+            // Bounded feedback headroom limit (prevents harsh runaway during ground short)
+            reg.feedback.gain = std::min(reg.feedback.gain, 0.82f);
         } else {
             // Restore registers on release
             if (_active) {

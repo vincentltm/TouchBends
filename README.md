@@ -89,8 +89,11 @@ Bridge **OSC + AMP** to hear the oscillator through the preamp.
 - **OSC + AMP + FLT (Switch A Down)**: Put the oscillator in Stepped Random and turn the OSC fader down low. This pings the resonant filter in generative melodic sequences like a modular sample and hold.
 
 ### 3. Modulating Delay
-- **OSC + CLK**: Modulates the delay clock for pitch warble and FM ring-mod tones.
-- **OSC + DLY**: Modulates delay time directly for chorus and vibrato.
+- **OSC + CLK**: Modulates delay clock for pitch vibrato, chorus, and FM sidebands.
+- **OSC + DLY**: Modulates delay time based on the oscillator waveform:
+  - **Saw**: Granular scrubbing (tape scrub at low speeds, grain clouds at high speeds).
+  - **Sine**: Smooth back-and-forth delay time sweep.
+  - **Stepped Random**: Rhythmic stutter and random tap jumps.
 
 ### 4. Bending External Audio & Delay
 Plug in a synth or drum machine (or tap the **IN** pad), and turn up **MIX**, **DLY**, and **FBK**:
