@@ -5,7 +5,6 @@
 namespace bends {
 
 struct OscillatorMods {
-    float chime{0.0f};
     float sub_octave{0.0f};
     float shape_warp{0.0f};
     float rungler_lock{0.0f};

@@ -21,67 +21,80 @@ public:
         _effective_vcc = 1.0f;
         _cached_ripple_scale = 0.0f;
         _cached_min_v = 0.50f;
-        _motorboat_phase = 0.0f;
+        _is_conducting = true;
         _motorboat_pulse = 0.0f;
     }
 
     // Call at control rate (~750 Hz)
     void ProcessControl(float fader_pos, float external_load, float network_vcc_pull, float direct_gnd_short = 0.0f) {
         float u = std::clamp(Sanitize(fader_pos, 1.0f), 0.0f, 1.0f);
-        // Gradual continuous multi-stage voltage taper across full slider travel (exact 0.0V at u=0)
+        // Continuous non-linear voltage taper (0V at u=0, 1.0V at u=1)
         _fader_vcc = (u <= 0.015f) ? 0.0f : (u * (0.75f + 0.25f * u));
         external_load = Sanitize(external_load, 0.0f);
         network_vcc_pull = Sanitize(network_vcc_pull, 0.0f);
         direct_gnd_short = std::clamp(Sanitize(direct_gnd_short, 0.0f), 0.0f, 1.0f);
         _cap_voltage = daisysp::fclamp(Sanitize(_cap_voltage, 1.0f), 0.0f, 1.0f);
 
-        // Musical internal battery impedance: produces dynamic sag on heavy feedback load
-        float starve_factor = 1.0f - _fader_vcc;
-        float r_internal = 0.015f + 0.075f * (starve_factor * starve_factor);
-
-        // Target voltage accounts for fader, current load, and network DC pull
-        float pull_effect = (network_vcc_pull < 0.0f) ? (network_vcc_pull * 0.35f) : (network_vcc_pull * 0.20f);
-        float sag = std::min(0.20f * _fader_vcc, r_internal * external_load);
-        float v_target = _fader_vcc - sag + pull_effect;
-
-        // Direct VCC <-> GND battery short pulls voltage directly down to 0V
-        if (direct_gnd_short > 0.08f) {
-            float drain = std::clamp((direct_gnd_short - 0.08f) * 1.25f, 0.0f, 1.0f);
-            v_target *= (1.0f - drain);
-            v_target = std::clamp(v_target, 0.0f, 1.0f);
-            _motorboat_pulse *= 0.80f;
-        } else if (_fader_vcc <= 0.015f) {
-            // Slider at bottom: complete clean power-down to 0V
-            v_target = 0.0f;
+        if (_fader_vcc <= 0.015f) {
+            // Power off: immediate decay to 0V
+            _cap_voltage *= 0.50f;
+            if (_cap_voltage < 0.005f) _cap_voltage = 0.0f;
+            _effective_vcc = _cap_voltage;
             _motorboat_pulse = 0.0f;
+            _is_conducting = false;
+            return;
+        }
+
+        // Physical internal battery impedance: rises non-linearly as battery starves
+        float starve_factor = 1.0f - _fader_vcc;
+        float r_internal = 0.025f + 0.55f * (starve_factor * starve_factor);
+        constexpr float c_rail = 0.220f; // Bulk reservoir capacitor (~220uF equivalent)
+        constexpr float dt = 1.0f / 750.0f;
+
+        // Dynamic Kirchhoff network DC pull effect on the battery
+        float pull_effect = (network_vcc_pull < 0.0f) ? (network_vcc_pull * 0.35f) : (network_vcc_pull * 0.20f);
+        float v_source = std::clamp(_fader_vcc + pull_effect, 0.005f, 1.0f);
+
+        // Hysteretic amplifier latch-up thresholds (physical transistor cut-off & recovery)
+        constexpr float v_cutoff = 0.065f;
+        constexpr float v_turn_on = 0.145f;
+
+        if (_is_conducting) {
+            if (_cap_voltage < v_cutoff) {
+                _is_conducting = false;
+            }
         } else {
-            // Soft min_floor allows dynamic touch-pressure rail sag in starved mode
-            float min_floor = 0.010f;
-            v_target = std::clamp(v_target, min_floor, 1.0f);
-
-            // Low-voltage supply motorboating (relaxation oscillation under load):
-            if (_fader_vcc < 0.25f && external_load > 0.08f) {
-                float starve_intensity = (0.25f - _fader_vcc) * 4.0f; // 0.0 to 1.0
-                float mb_freq = 3.0f + 5.5f * std::clamp(external_load * 0.5f, 0.0f, 1.0f);
-                _motorboat_phase += mb_freq * (1.0f / 750.0f);
-                if (_motorboat_phase >= 1.0f) _motorboat_phase -= 1.0f;
-
-                // Cosine relaxation pulse
-                float pulse = 0.5f * (1.0f - FastCos(_motorboat_phase * kTwoPi));
-                float dip = pulse * pulse * starve_intensity * 0.35f * _cap_voltage;
-                _motorboat_pulse = pulse * starve_intensity;
-                v_target = std::max(min_floor, v_target - dip);
-            } else {
-                _motorboat_pulse *= 0.85f;
-                if (_motorboat_pulse < 0.001f) _motorboat_pulse = 0.0f;
-                _motorboat_phase = 0.0f;
+            if (_cap_voltage > v_turn_on) {
+                _is_conducting = true;
             }
         }
 
-        // Reservoir capacitor: fast discharge on load spike, smooth recharge
-        float alpha = (_fader_vcc <= 0.015f) ? 0.65f : ((v_target < _cap_voltage) ? 0.20f : 0.038f);
-        _cap_voltage += alpha * (v_target - _cap_voltage);
+        // Active dynamic current draw from the rail:
+        // Amplifiers draw heavy current when conducting; when cut off, only quiescent leakage remains
+        float i_load = _is_conducting ? (external_load * 0.95f + 0.015f * _cap_voltage) : (0.010f * _cap_voltage);
+
+        // Direct ground short (finger bridge directly between VCC and GND)
+        if (direct_gnd_short > 0.05f) {
+            i_load += direct_gnd_short * 3.5f * _cap_voltage;
+        }
+
+        // Differential equation: C * (dv/dt) = I_charge - I_load
+        float i_charge = (v_source - _cap_voltage) / r_internal;
+        float dv = ((i_charge - i_load) / c_rail) * dt;
+
+        _cap_voltage = std::clamp(_cap_voltage + dv, 0.005f, 1.0f);
         _effective_vcc = _cap_voltage;
+
+        // Motorboat pulse: tracks dynamic relaxation voltage deflection when starved
+        if (_fader_vcc < 0.28f && external_load > 0.06f) {
+            float starve_intensity = (0.28f - _fader_vcc) * 3.57f;
+            float dip = std::clamp((v_turn_on - _cap_voltage) / (v_turn_on - v_cutoff + 0.001f), 0.0f, 1.0f);
+            _motorboat_pulse += 0.25f * (dip * starve_intensity - _motorboat_pulse);
+        } else {
+            _motorboat_pulse *= 0.82f;
+            if (_motorboat_pulse < 0.001f) _motorboat_pulse = 0.0f;
+        }
+
         _cached_ripple_scale = (1.0f - _cap_voltage) * 0.45f;
         _cached_min_v = _cap_voltage * 0.50f;
     }
@@ -101,6 +114,7 @@ public:
     float CapVoltage() const     { return _cap_voltage; }
     float FaderVcc() const       { return _fader_vcc; }
     float MotorboatPulse() const { return _motorboat_pulse; }
+    bool  IsConducting() const   { return _is_conducting; }
 
 private:
     float _fader_vcc{1.0f};
@@ -108,7 +122,7 @@ private:
     float _effective_vcc{1.0f};
     float _cached_ripple_scale{0.0f};
     float _cached_min_v{0.50f};
-    float _motorboat_phase{0.0f};
+    bool  _is_conducting{true};
     float _motorboat_pulse{0.0f};
 };
 

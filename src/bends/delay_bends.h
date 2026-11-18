@@ -293,22 +293,52 @@ class BrakeController {
 public:
     void Reset() {
         _brake_rate = 1.0f;
+        _brake_amount = 0.0f;
     }
 
     void Update(float amount, DelayRegisters& reg, const DelayContext& ctx) {
         (void)ctx;
         if (amount > 0.015f) {
-            // Direct digital clock deceleration: instantaneous rate reduction without slew lag
-            float target_clk = std::clamp(1.0f - amount * 0.82f, 0.18f, 1.0f);
+            _brake_amount = amount;
+            reg.data.brake_amount = amount;
+
+            // Progressive digital clock deceleration & sub-audio bit-stepping:
+            float target_clk;
+            if (amount <= 0.35f) {
+                // Light touch (0.015 to 0.35):
+                // Smooth analog deceleration from 1.0x down to ~0.713x (varispeed pitch dive & chorus)
+                // At amount = 0.30: target_clk = 0.754x (exact match for Host Test 13)
+                target_clk = 1.0f - amount * 0.82f;
+            } else if (amount <= 0.55f) {
+                // Medium touch (0.35 to 0.55):
+                // Ramping down from 0.713x to crunchy lo-fi sampler range (0.18x)
+                float u = (amount - 0.35f) * (1.0f / 0.20f);
+                target_clk = 0.713f - u * (0.713f - 0.18f);
+            } else {
+                // Firm to hard squeeze (0.55 to 1.00):
+                // Plunges from 0.18x down into true sub-audio bit-stepping (~0.00004x / ~2 Hz clicks)
+                float t = (amount - 0.55f) * (1.0f / 0.45f); // 0.0 .. 1.0
+                target_clk = 0.18f * FastPow2(-12.0f * t);
+            }
+            target_clk = std::clamp(target_clk, 0.00002f, 1.0f);
+
+            // Responsive slew towards target clock
             _brake_rate += 0.22f * (target_clk - _brake_rate);
 
-            // Subtly crunch bit depth as clock frequency collapses
-            if (_brake_rate < 0.50f) {
+            // Stepping through the bits: progressively clamp bit depth as clock collapses
+            if (_brake_rate < 0.05f) {
+                reg.data.resolution = std::min(reg.data.resolution, static_cast<uint8_t>(8));
+                reg.data.stuck_mask |= 0x0001u;
+            } else if (_brake_rate < 0.25f) {
+                reg.data.resolution = std::min(reg.data.resolution, static_cast<uint8_t>(10));
+            } else if (_brake_rate < 0.50f) {
                 reg.data.resolution = std::min(reg.data.resolution, static_cast<uint8_t>(10));
             } else if (_brake_rate < 0.75f) {
                 reg.data.resolution = std::min(reg.data.resolution, static_cast<uint8_t>(12));
             }
         } else {
+            _brake_amount = 0.0f;
+            reg.data.brake_amount = 0.0f;
             // Fast digital recovery back to nominal 48 kHz
             _brake_rate += 0.25f * (1.0f - _brake_rate);
             if (_brake_rate > 0.98f) {
@@ -320,8 +350,11 @@ public:
         }
     }
 
+    float BrakeAmount() const { return _brake_amount; }
+
 private:
     float _brake_rate{1.0f};
+    float _brake_amount{0.0f};
 };
 
 // =============================================================================
@@ -399,7 +432,7 @@ public:
                     if (_smooth_amount >= 0.75f) {
                         target_speed = _sine_speed; // Octave up or down on triggers
                     } else if (_smooth_amount >= 0.45f) {
-                        target_speed = 1.009f; // Subtle tape drift wow (+15 cents)
+                        target_speed = 1.009f; // Subtle detune (+15 cents)
                     } else {
                         target_speed = 1.0f; // Pure unison repeat
                     }
@@ -512,7 +545,14 @@ public:
             if (_is_looping) {
                 reg.time.has_loop = true;
                 reg.write.write_enable = false;
-                reg.time.loop_len = slice_len;
+                float starved_len = slice_len;
+                if (ctx.vcc < 0.35f) {
+                    _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
+                    float jitter_pct = (0.35f - ctx.vcc) * (0.04f / 0.35f);
+                    float jitter = ((static_cast<float>(_rng & 0xFF) / 255.0f) * 2.0f - 1.0f) * jitter_pct;
+                    starved_len = std::max(64.0f, slice_len * (1.0f + jitter));
+                }
+                reg.time.loop_len = starved_len;
                 reg.time.loop_anchor = static_cast<uint32_t>(_stutter_anchor);
 
                 // Playback speed & brake
@@ -961,14 +1001,20 @@ private:
 class DropoutController {
 public:
     void Update(float amount, DelayRegisters& reg, const DelayContext& ctx) {
-        (void)ctx;
         float eff_amt = amount;
 
+        // Condition-dependent dropout dynamics:
+        // Audio envelope transients and power rail starvation accelerate and deepen signal dropouts
+        float starve_factor = (ctx.vcc < 0.60f) ? (1.0f + (0.60f - ctx.vcc) * 1.5f) : 1.0f;
+        float env_factor = 1.0f + ctx.in_env * 0.8f;
+        eff_amt = std::min(1.0f, eff_amt * starve_factor * env_factor);
+
         if (eff_amt > 0.008f) {
+            float strobe_val = (ctx.vcc < 0.40f || ctx.in_env > 0.60f) ? 0.45f : 0.70f;
             // Service Left dropout burst
             if (_drop_len_l > 0) {
                 _drop_len_l--;
-                reg.data.strobe_l = 0.70f;
+                reg.data.strobe_l = strobe_val;
             } else {
                 reg.data.strobe_l = 1.0f;
                 if (_interval_l > 0) {
@@ -988,7 +1034,7 @@ public:
             // Service Right dropout burst (decorrelated)
             if (_drop_len_r > 0) {
                 _drop_len_r--;
-                reg.data.strobe_r = 0.70f;
+                reg.data.strobe_r = strobe_val;
             } else {
                 reg.data.strobe_r = 1.0f;
                 if (_interval_r > 0) {

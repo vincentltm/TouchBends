@@ -125,8 +125,8 @@ public:
             target_low = 1.0f;
             target_high = 0.0f;
             // Taper resonance at high frequencies
-            if (target_f > 3500.0f) {
-                float hf_taper = std::max(0.0f, 1.0f - (target_f - 3500.0f) / 12500.0f);
+            if (target_f > 4500.0f) {
+                float hf_taper = std::max(0.18f, 1.0f - (target_f - 4500.0f) / 7500.0f);
                 t_res = hf_taper * hf_taper;
             } else {
                 t_res = 1.0f;
@@ -137,7 +137,7 @@ public:
             target_low = 0.0f;
             target_high = 0.88f; // Gentle acoustic trim so bright HP doesn't overpower warm LP
             // High-pass resonance scaling:
-            t_res = 0.60f;
+            t_res = 0.85f;
             if (target_f < 80.0f) {
                 t_res *= std::max(0.0f, (target_f - 20.0f) / 60.0f);
             } else if (target_f > 1200.0f) {
@@ -208,7 +208,6 @@ public:
             _cached_inv_deadzone = 0.0f;
             _cached_has_deadzone = false;
         }
-        _cached_band_sat_scale = 0.85f + 0.65f * starve;
 
         // Active resonance calculation:
         float res = daisysp::fclamp(touch_flt + mods.resonance, 0.0f, 1.0f) * t_res;
@@ -240,7 +239,7 @@ public:
         _post_drive += 0.20f * (_target_post_drive - _post_drive);
     }
 
-    __attribute__((always_inline)) inline void Process(float in_l, float in_r,
+    __attribute__((noinline)) void Process(float in_l, float in_r,
                         float touch_flt,
                         const FilterMods& mods,
                         float v_rail_eff, float starve,
@@ -295,9 +294,9 @@ public:
             return;
         }
 
-        // 24 kHz decimation for SVF coefficient pre-warping and denominator division
+        // 12 kHz decimation for SVF coefficient pre-warping and denominator division
         _flt_decim = (_flt_decim + 1) & 3;
-        if ((_flt_decim & 1) == 0) {
+        if (__builtin_expect(_flt_decim == 0, 0)) {
             float total_cutoff_mod = std::clamp(mods.cutoff_ramp + mods.clock_step * 1.5f, -4.0f, 4.0f);
             float drum_punch = 1.0f + _pitch_dive * 1.85f;
             float base = _cur_base_f * _flt_v_scale * drum_punch;
@@ -316,39 +315,34 @@ public:
             _cached_g_l = g_l;
             _cached_g_r = g_r;
 
-            // Damping & resonance (evaluated at 12 kHz decimation for CPU efficiency)
-            if (_flt_decim == 0) {
-                float r_ping = 0.040f;
-                float ping_fade = 1.0f - _ping_env;
-                float r_ping_eff = r_ping + (0.707f - r_ping) * ping_fade;
+            // Damping & resonance
+            float r_ping = 0.040f;
+            float ping_fade = 1.0f - _ping_env;
+            float r_ping_eff = r_ping + (0.707f - r_ping) * ping_fade;
 
-                float R = std::min(r_ping_eff, _cached_r);
-                R = std::max(_cached_min_R, R);
+            float R = std::min(r_ping_eff, _cached_r);
+            R = std::max(_cached_min_R, R);
 
-                float hf_loss_l = g_l * g_l * 0.22f;
-                float hf_loss_r = g_r * g_r * 0.22f;
+            float hf_loss_l = g_l * g_l * 0.22f;
+            float hf_loss_r = g_r * g_r * 0.22f;
 
-                float band_sq_l = _s1_l * _s1_l * 0.05f;
-                float band_sq_r = _s1_r * _s1_r * 0.05f;
-                float diode_l = std::min(0.35f, band_sq_l);
-                float diode_r = std::min(0.35f, band_sq_r);
+            float band_sq_l = _s1_l * _s1_l * 0.05f;
+            float band_sq_r = _s1_r * _s1_r * 0.05f;
+            float diode_l = std::min(0.35f, band_sq_l);
+            float diode_r = std::min(0.35f, band_sq_r);
 
-                float R_l = R + hf_loss_l + diode_l + _cached_starve_damping;
-                float R_r = R + hf_loss_r + diode_r + _cached_starve_damping;
+            float R_l = R + hf_loss_l + diode_l + _cached_starve_damping;
+            float R_r = R + hf_loss_r + diode_r + _cached_starve_damping;
 
-                R_l = 0.707f + (R_l - 0.707f) * shunt_gnd;
-                R_r = 0.707f + (R_r - 0.707f) * shunt_gnd;
+            R_l = 0.707f + (R_l - 0.707f) * shunt_gnd;
+            R_r = 0.707f + (R_r - 0.707f) * shunt_gnd;
 
-                if (mods.howl > 0.08f && v_rail_eff < health::kTired) {
-                    R_l = std::max(0.040f, R_l - mods.howl * 0.30f);
-                    R_r = std::max(0.040f, R_r - mods.howl * 0.30f);
-                }
-                _cached_R_l = R_l;
-                _cached_R_r = R_r;
+            if (mods.howl > 0.08f && v_rail_eff < health::kTired) {
+                R_l = std::max(0.040f, R_l - mods.howl * 0.30f);
+                R_r = std::max(0.040f, R_r - mods.howl * 0.30f);
             }
-
-            float R_l = _cached_R_l;
-            float R_r = _cached_R_r;
+            _cached_R_l = R_l;
+            _cached_R_r = R_r;
 
             _cached_h_l = 1.0f / (1.0f + 2.0f * R_l * g_l + g_l * g_l);
             _cached_r2_g_l = 2.0f * R_l + g_l;
@@ -374,7 +368,6 @@ public:
             in_r += starve * mods.howl * 0.15f;
         }
 
-
         // Input saturation under starvation
         if (__builtin_expect(starve > 0.01f, 0)) {
             in_l = (in_l + starve * 0.20f * in_l * std::abs(in_l)) * _cached_drive;
@@ -391,14 +384,15 @@ public:
             in_r = in_r * (1.0f - _smooth_wavefold) + folded_r * _smooth_wavefold;
         }
 
-        // Minimal seed offset (-100 dBFS) to initiate self-oscillation from silence when Q approaches infinity:
+        // Sub-audible thermal Johnson seed (-100 dBFS):
         if (mods.howl > 0.08f && _cached_r < 0.035f && std::abs(_s1_l) < 1.0e-5f) {
             _s1_l += 1.0e-5f;
             _s1_r += 1.0e-5f;
         }
 
-        // Stereo SVF with non-linear integrator saturation
-        float band_sat_scale = _cached_band_sat_scale;
+        // Stereo SVF with non-linear integrator saturation:
+        // Gives the filter warm, fat, singing, gooey analog character, especially when starved!
+        float band_sat_scale = 0.85f + 0.65f * starve;
         float high_l = (in_l - r2_g_l * _s1_l - _s2_l) * h_l;
         float v1_l = g_l * high_l;
         float band_l = v1_l + _s1_l;
@@ -433,8 +427,8 @@ public:
 
         // Post-filter soft saturation (controlled by S30 AMP)
         if (_post_drive > 1.01f) {
-            out_sig_l = FastSoftSat(out_sig_l * (_post_drive * 0.65f));
-            out_sig_r = FastSoftSat(out_sig_r * (_post_drive * 0.65f));
+            out_sig_l = FastSoftSat(out_sig_l * _post_drive);
+            out_sig_r = FastSoftSat(out_sig_r * _post_drive);
         } else if (_post_gain < 0.99f) {
             out_sig_l *= _post_gain;
             out_sig_r *= _post_gain;
@@ -510,7 +504,6 @@ private:
     float _cached_deadzone{0.0f};
     float _cached_inv_deadzone{0.0f};
     bool  _cached_has_deadzone{false};
-    float _cached_band_sat_scale{0.85f};
     float _cached_starve_t{0.0f};
     float _cached_r{0.707f};
     float _cached_min_R{0.055f};

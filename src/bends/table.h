@@ -45,8 +45,9 @@ constexpr Bend kMasterBendTable[] = {
     // DLY - GND: Buffer address skip / bit shuffle
     BEND_PAIR(Dly, Gnd, Slot::DlySkip,        Sig::One,      1.00f, When::Always, Flag::NoBleed),
 
-    // DLY - VCC: Delay write scatter / address shift
+    // DLY - VCC: Delay write scatter & octave-up shimmer sparkle
     BEND_PAIR(Dly, Vcc, Slot::DlyScatter,     Sig::One,      1.00f, When::Always, Flag::None),
+    BEND_PAIR(Dly, Vcc, Slot::DlySparkle,     Sig::One,      1.00f, When::Always, Flag::None),
 
     // DLY - FBK: Delay feedback glitch and crossfeed modulation
     BEND_PAIR(Dly, Fbk, Slot::DlyFbkGlitch,   Sig::One,      1.00f, When::Always, Flag::NoBleed),
@@ -70,9 +71,9 @@ constexpr Bend kMasterBendTable[] = {
     // 2. Two-Point Bends
     // -------------------------------------------------------------------------
     // Clock / Speed
-    BEND_PAIR(Clk, Gnd, Slot::DlyBrake,       Sig::One,      1.00f, When::Always, Flag::NoBleed),
+    BEND_PAIR(Clk, Gnd, Slot::DlyBrake,       Sig::One,      1.70f, When::Always, Flag::NoBleed),
     BEND_PAIR(Vcc, Clk, Slot::ClkOverclock,   Sig::One,      1.00f, When::Always, Flag::None),
-    // OSC <-> CLK: Pitch vibrato, analog tape chorus, and clock FM
+    // OSC <-> CLK: Pitch vibrato, analog chorus, and clock FM
     BEND_PAIR(Osc, Clk, Slot::DlyClockFm,     Sig::One,      0.85f, When::Always, Flag::NoBleed),
     BEND_PAIR(Osc, Clk, Slot::OscRunglerLock, Sig::One,      1.00f, When::Rnd,    Flag::None),
     BEND_PAIR(Clk, Amp, Slot::AmpTremolo,     Sig::ClkPulse, 1.00f, When::Always, Flag::None),
@@ -158,6 +159,42 @@ constexpr Bend kMasterBendTable[] = {
 
     // OUT <-> FBK: Acoustic Resonant Larsen Howl & Feedback Squeal
     BEND_PAIR(Out, Fbk, Slot::DlyLarsenHowl,  Sig::One,      1.00f, When::Always, Flag::NoBleed),
+
+    // -------------------------------------------------------------------------
+    // Universal Surface Bends (Completing all 66 pairs)
+    // -------------------------------------------------------------------------
+    // CLK - MIX: Clock groove swing & syncopation
+    BEND_PAIR(Clk, Mix, Slot::ClkSwing,       Sig::One,      1.00f, When::Always, Flag::None),
+
+    // DLY - OUT: Stereo read-head decoupling & wide spatial separation
+    BEND_PAIR(Dly, Out, Slot::DlyStereoSplit, Sig::One,      1.00f, When::Always, Flag::NoBleed),
+
+    // DLY - IN: Alternating crossfeed ping-pong echoes
+    BEND_PAIR(Dly, In,  Slot::DlyPingPong,    Sig::One,      1.00f, When::Always, Flag::NoBleed),
+
+    // AMP - RST: Preamp spikes into reset bus -> strobe dropouts & address jumps
+    BEND_PAIR(Amp, Rst, Slot::DlyDropout,     Sig::PreampOut, 1.00f, When::Always, Flag::NoBleed),
+
+    // IN - RST: Acoustic contact mic tap resets delay playback head to live write head
+    BEND_PAIR(In,  Rst, Slot::DlyRestart,     Sig::One,      1.00f, When::Always, Flag::Onset),
+
+    // OUT - RST: Master output audio peaks spike reset line -> clock freeze/hold
+    BEND_PAIR(Out, Rst, Slot::ClkHold,        Sig::OutEnv,   1.00f, When::Always, Flag::NoBleed),
+
+    // IN - MIX: Acoustic contact mic routed directly to mixer (dry tactile bypass)
+    BEND_PAIR(In,  Mix, Slot::MixAmpDirect,   Sig::One,      1.00f, When::Always, Flag::NoBleed),
+
+    // MIX - OUT: Master mix output saturation overdrive
+    BEND_PAIR(Mix, Out, Slot::MixDrive,       Sig::One,      1.00f, When::Always, Flag::NoBleed),
+
+    // IN - GND: Contact mic ground shunt / input choke
+    BEND_PAIR(In,  Gnd, Slot::PreampMute,     Sig::One,      1.00f, When::Always, Flag::None),
+
+    // IN - VCC: Power rail bias on contact mic -> high-voltage sensitivity boost
+    BEND_PAIR(In,  Vcc, Slot::MicBoost,       Sig::One,      1.50f, When::Always, Flag::None),
+
+    // OUT - VCC: Master audio output into power rail -> dynamic rail sag & runaway pumping
+    BEND_PAIR(Out, Vcc, Slot::DlyRunaway,     Sig::OutEnv,   1.20f, When::Always, Flag::None),
 
     // -------------------------------------------------------------------------
     // 3. Solo Pad Touch

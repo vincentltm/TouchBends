@@ -128,7 +128,7 @@ public:
         _cached_spk_alpha = 1.0f - _crank * 0.55f;
     }
 
-    __attribute__((always_inline)) inline void Process(float in_l, float in_r,
+    __attribute__((noinline)) void Process(float in_l, float in_r,
                         float /*touch_amp*/,
                         const PreampMods& mods,
                         float osc_inject_l, float osc_inject_r, float hum_inject,
@@ -177,21 +177,19 @@ public:
             _pre_tight_r = proc_in_r;
         }
 
-        // Supply voltage sag and compression envelope (evaluated at 24 kHz)
+        // Supply voltage sag and compression envelope
+        float in_peak = std::max(std::abs(proc_in_l), std::abs(proc_in_r)) * (_cached_drive_eff * 0.08f);
+        if (in_peak > _sag_env) {
+            _sag_env += 0.05f * (in_peak - _sag_env); // fast attack ~0.4ms
+        } else {
+            _sag_env += 0.00015f * (in_peak - _sag_env); // slow release ~140ms
+        }
         _sag_comp_cnt = (_sag_comp_cnt + 1) & 3;
-        if ((_sag_comp_cnt & 1) == 0) {
-            float in_peak = std::max(std::abs(proc_in_l), std::abs(proc_in_r)) * (_cached_drive_eff * 0.08f);
-            if (in_peak > _sag_env) {
-                _sag_env += 0.10f * (in_peak - _sag_env); // fast attack ~0.4ms
-            } else {
-                _sag_env += 0.00030f * (in_peak - _sag_env); // slow release ~140ms
-            }
-            if (_sag_comp_cnt == 0) {
-                _cached_sag_comp = _cached_has_crank ? (1.0f / (1.0f + _crank * 0.35f * std::min(2.0f, _sag_env))) : 1.0f;
-                float d_mod = std::min(mods.drive, 3.6f);
-                float raw_eff = (_cached_drive_eff + d_mod * 2.8f * _cached_starve_boost) * _cached_sag_comp;
-                _cached_eff_drive = std::min(raw_eff, 24.0f);
-            }
+        if (_sag_comp_cnt == 0) {
+            _cached_sag_comp = (_crank > 0.01f) ? (1.0f / (1.0f + _crank * 0.35f * std::min(2.0f, _sag_env))) : 1.0f;
+            float d_mod = std::min(mods.drive, 3.6f);
+            float raw_eff = (_cached_drive_eff + d_mod * 2.8f * _cached_starve_boost) * _cached_sag_comp;
+            _cached_eff_drive = std::min(raw_eff, 24.0f);
         }
         float eff_drive = _cached_eff_drive;
 
@@ -246,15 +244,11 @@ private:
         float scaled_in = amp_in * drive_eff;
 
         // Slew-rate limiting (op-amp bandwidth collapse under starvation)
-        float in_proc;
-        if (__builtin_expect(_cached_has_slew, 0)) {
-            float slew_delta = std::clamp(scaled_in - slew_state, -_cached_max_slew, _cached_max_slew);
-            slew_state += slew_delta;
-            in_proc = slew_state;
-        } else {
-            slew_state = scaled_in;
-            in_proc = scaled_in;
-        }
+        float slew_delta = scaled_in - slew_state;
+        slew_delta = std::clamp(slew_delta, -_cached_max_slew, _cached_max_slew);
+        slew_state += slew_delta;
+        slew_state = std::clamp(slew_state, -6.0f, 6.0f);
+        float in_proc = slew_state;
 
         float mag = std::abs(in_proc);
 

@@ -54,6 +54,7 @@ struct DataRegisters {
     uint32_t stuck_mask{0};    // Stuck bit mask (data line short)
     uint8_t  resolution{16};   // Bit depth (16 = normal, down to 8 = lofi)
     float    filter_bypass{0.0f}; // 0.0 = reconstruction filter active, 1.0 = reconstruction filter bypassed
+    float    brake_amount{0.0f};  // CLK-GND touch bend intensity (0.0 = normal, >0.0 = bending CLK to GND)
 };
 
 struct MemoryRegisters {

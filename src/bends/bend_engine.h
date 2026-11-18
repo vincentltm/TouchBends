@@ -111,10 +111,10 @@ public:
     bool FlushRequested() const { return _flush_requested; }
     const uint16_t* RoutedMask() const { return _routed_mask; }
     bool IsRouted(uint8_t a, uint8_t b) const { return (_routed_mask[a] >> b) & 1u; }
-    uint32_t ActiveBendsMask() const {
-        uint32_t mask = 0;
-        for (size_t i = 0; i < kNumMasterBends && i < 32; ++i) {
-            if (_was_engaged[i]) mask |= (1u << i);
+    uint64_t ActiveBendsMask() const {
+        uint64_t mask = 0;
+        for (size_t i = 0; i < kNumMasterBends && i < 64; ++i) {
+            if (_was_engaged[i]) mask |= (1ULL << i);
         }
         return mask;
     }

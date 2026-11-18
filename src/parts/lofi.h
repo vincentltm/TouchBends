@@ -19,6 +19,7 @@ struct Lofi {
     float lofi_amt{0.0f};
     float whine_scale{0.0f};
     float detent_blend{-1.0f};
+    float brake_amount{0.0f};
     bool  active{false};
 
     void Init() {
@@ -37,13 +38,15 @@ struct Lofi {
         lofi_amt = 0.0f;
         whine_scale = 0.0f;
         detent_blend = -1.0f;
+        brake_amount = 0.0f;
         active = true;
     }
 
-    inline void Prepare(float clock_ratio, float sample_rate) {
-        float target = std::clamp(clock_ratio, 0.04f, 1.0f);
-        if (std::abs(target - clock_speed) < 0.003f && active) return;
+    inline void Prepare(float clock_ratio, float sample_rate, float brake_amt = 0.0f) {
+        float target = std::clamp(clock_ratio, 0.00002f, 1.0f);
+        if (std::abs(target - clock_speed) < 0.003f && std::abs(brake_amt - brake_amount) < 0.01f && active) return;
         clock_speed = target;
+        brake_amount = brake_amt;
         active = true;
 
         if (clock_speed >= 0.96f) {
@@ -55,17 +58,31 @@ struct Lofi {
         } else {
             // Underclock intensity: 0.0 at 0.92x, ramping to 1.0 at 0.20x
             lofi_amt = std::clamp((0.92f - clock_speed) * 1.3888889f, 0.0f, 1.0f);
-            whine_scale = (lofi_amt > 0.005f) ? (lofi_amt * lofi_amt * 0.0030f) : 0.0f;
+
+            // Heterodyne whistle: ONLY active when physically bending CLK + GND (brake_amt > 0.02f)
+            // Completely silent during normal knob underclocking
+            if (brake_amount > 0.02f && clock_speed > 0.04f && clock_speed < 0.85f) {
+                float bell = FastSin(std::clamp((0.85f - clock_speed) * (kPi / 0.81f), 0.0f, kPi));
+                whine_scale = 0.016f * bell * std::clamp(brake_amount * 1.25f, 0.0f, 1.0f);
+            } else {
+                whine_scale = 0.0f;
+            }
             detent_blend = (clock_speed > 0.94f) ? std::clamp((0.99f - clock_speed) * 20.0f, 0.0f, 1.0f) : -1.0f;
 
-            // ADM slew rate limiting
-            max_slew = 0.040f + 0.36f * (clock_speed * clock_speed);
+            if (clock_speed < 0.05f) {
+                // Sub-audio bit-stepping: raw DAC step clicks without reconstruction slew
+                max_slew = 2.0f;
+                alpha = 0.95f;
+            } else {
+                // ADM slew rate limiting
+                max_slew = 0.040f + 0.36f * (clock_speed * clock_speed);
 
-            // Reconstruction filter cutoff tracking clock
-            float inv_sr = (sample_rate > 0.0f) ? (1.0f / sample_rate) : (1.0f / 48000.0f);
-            float cutoff = std::clamp(5200.0f * clock_speed + 2800.0f, 2800.0f, 18000.0f);
-            float w = cutoff * (kTwoPi * inv_sr);
-            alpha = std::clamp(w / (1.0f + w), 0.035f, 0.95f);
+                // Reconstruction filter cutoff tracking clock
+                float inv_sr = (sample_rate > 0.0f) ? (1.0f / sample_rate) : (1.0f / 48000.0f);
+                float cutoff = std::clamp(5200.0f * clock_speed + 2800.0f, 2800.0f, 18000.0f);
+                float w = cutoff * (kTwoPi * inv_sr);
+                alpha = std::clamp(w / (1.0f + w), 0.035f, 0.95f);
+            }
         }
     }
 
@@ -100,9 +117,9 @@ struct Lofi {
         float step = std::clamp(diff, -max_slew, max_slew);
         integrator += step;
 
-        // Reconstruction low-pass
+        // Reconstruction low-pass (bypassed at sub-audio stall rates to expose raw bit-step clicks)
         float out;
-        if (__builtin_expect(filter_bypass >= 0.99f, 0)) {
+        if (__builtin_expect(filter_bypass >= 0.99f || dynamic_speed < 0.05f, 0)) {
             lp1 = integrator;
             lp2 = integrator;
             out = integrator;
@@ -113,12 +130,12 @@ struct Lofi {
             out = lp2 + eff_grit * (integrator - lp2);
         }
 
-        // Clock heterodyne whine
+        // Clock heterodyne whine (active only during CLK-GND bend, gated by input presence)
         if (whine_scale > 0.0f) {
             float abs_in = std::abs(in);
             if (abs_in > 0.005f) {
                 float tri = (clock_phase < 0.5f) ? (4.0f * clock_phase - 1.0f) : (3.0f - 4.0f * clock_phase);
-                out += tri * (whine_scale * std::min(abs_in * 2.0f, 1.0f));
+                out += tri * (whine_scale * (0.25f + 0.75f * std::min(abs_in * 3.0f, 1.0f)));
             }
         }
 

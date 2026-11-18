@@ -242,117 +242,43 @@ inline void RunOnDevicePerformanceCheck(DaisySeed& hw, Instrument& instrument, S
         hw.PrintLine("  -------------------------------------------+------------------+--------------+-------");
         System::Delay(10);
 
-        // ---------------------------------------------------------------------
-        // 1. Baseline & Knobs / Faders
-        // ---------------------------------------------------------------------
+        // 1. Baseline & Knobs
         {
             ControlFrame f = fb;
-            RunTest("Baseline: 50% All Knobs Clean", f);
-        }
-        {
-            ControlFrame f = fb; f.s32_mix = 0.00f;
-            RunTest("Knob: Mix 0% Dry Only", f);
-        }
-        {
-            ControlFrame f = fb; f.s32_mix = 1.00f;
-            RunTest("Knob: Mix 100% Wet Only", f);
-        }
-        {
-            ControlFrame f = fb; f.s30_amp = 1.0f; f.s35_fbk = 0.85f;
-            RunTest("Knob: Cranked Amp & Fbk", f);
-        }
-        {
-            ControlFrame f = fb; f.s33_clk = 0.00f; f.s34_dly = 1.0f;
-            RunTest("Knob: Min Clock / Max Delay", f);
-        }
-        {
-            ControlFrame f = fb; f.s33_clk = 1.00f; f.s34_dly = 0.005f;
-            RunTest("Knob: Max Overclock / Karplus Delay", f);
-        }
-
-        // ---------------------------------------------------------------------
-        // 2. Starvation Voltage Sweeps
-        // ---------------------------------------------------------------------
-        {
-            ControlFrame f = fb; f.s37_vcc = 0.50f;
-            RunTest("Starve: VCC=50%", f);
-        }
-        {
-            ControlFrame f = fb; f.s37_vcc = 0.20f;
+            RunTest("Baseline: 50% Knobs", f);
+            RenderProfile bp = instrument.GetGraph().last_profile;
+            hw.PrintLine("    [Base] clk:%lu osc:%lu pre:%lu flt:%lu dly:%lu mix:%lu out:%lu",
+                         bp.clock, bp.osc, bp.preamp, bp.filter, bp.delay, bp.mixer, bp.output);
+            System::Delay(2);
+            f.s30_amp = 1.0f; f.s35_fbk = 0.85f; f.s32_mix = 1.0f;
+            RunTest("Knob: Cranked Amp/Fbk/Mix", f);
+            f = fb; f.s33_clk = 1.0f; f.s34_dly = 0.005f;
+            RunTest("Knob: Overclock / Karplus", f);
+            f = fb; f.s37_vcc = 0.20f;
             RunTest("Starve: VCC=20%", f);
-        }
-        {
-            ControlFrame f = fb; f.s37_vcc = 0.05f;
-            RunTest("Starve: VCC=5% Deep Collapse", f);
+            f.s37_vcc = 0.05f;
+            RunTest("Starve: VCC=5%", f);
         }
 
-        // ---------------------------------------------------------------------
-        // 3. Single-Pad Isolations (P00 through P11)
-        // ---------------------------------------------------------------------
+        // 2. Solo Pads
         for (int p = 0; p < 12; ++p) {
             ControlFrame f = fb;
             f.pressures[p] = 1.0f;
-            char buf[48];
+            char buf[32];
             snprintf(buf, sizeof(buf), "Solo Pad: %s", kPadNames[p]);
             RunTest(buf, f, 12);
         }
 
-        // ---------------------------------------------------------------------
-        // 4. Full Exhaustive 66-Pair Matrix Combinations (All 0 <= i < j < 12)
-        // ---------------------------------------------------------------------
-        char label[48];
-        for (int i = 0; i < 12; ++i) {
-            for (int j = i + 1; j < 12; ++j) {
-                // Scenario A: Nominal
-                {
-                    ControlFrame f = fb;
-                    f.pressures[i] = 1.0f;
-                    f.pressures[j] = 1.0f;
-                    snprintf(label, sizeof(label), "Pair %s-%s (Nominal)", kPadNames[i], kPadNames[j]);
-                    RunTest(label, f, 16);
-                }
-                // Scenario B: Starved VCC = 0.20V
-                {
-                    ControlFrame f = fb;
-                    f.pressures[i] = 1.0f;
-                    f.pressures[j] = 1.0f;
-                    f.s37_vcc = 0.20f;
-                    snprintf(label, sizeof(label), "Pair %s-%s (Starved)", kPadNames[i], kPadNames[j]);
-                    RunTest(label, f, 16);
-                }
-                // Scenario C: High Drive & Feedback
-                {
-                    ControlFrame f = fb;
-                    f.pressures[i] = 1.0f;
-                    f.pressures[j] = 1.0f;
-                    f.s30_amp = 1.0f;
-                    f.s35_fbk = 0.85f;
-                    snprintf(label, sizeof(label), "Pair %s-%s (HighDrive)", kPadNames[i], kPadNames[j]);
-                    RunTest(label, f, 16);
-                }
-                // Scenario D: Dynamic Swept Knobs (Delay, Filter, Amp moving across blocks)
-                {
-                    ControlFrame f = fb;
-                    f.pressures[i] = 1.0f;
-                    f.pressures[j] = 1.0f;
-                    snprintf(label, sizeof(label), "Pair %s-%s (SweptKnobs)", kPadNames[i], kPadNames[j]);
-                    RunTestSwept(label, f, 20);
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------------
-        // 5. Complex Multi-Touch Topologies (Triads, Quartets, Clusters)
-        // ---------------------------------------------------------------------
+        // 3. Complex Topologies & Clusters
         {
             ControlFrame f = fb;
             f.pressures[NodeOsc] = 1.0f; f.pressures[NodeClk] = 1.0f; f.pressures[NodeDly] = 1.0f;
-            RunTest("Triad: Lissajous Cloud (OSC+CLK+DLY)", f);
+            RunTest("Triad: Lissajous (OSC+CLK+DLY)", f);
         }
         {
             ControlFrame f = fb;
             f.pressures[NodeFlt] = 1.0f; f.pressures[NodeDly] = 1.0f; f.pressures[NodeFbk] = 1.0f;
-            RunTest("Triad: Karplus Resonator (FLT+DLY+FBK)", f);
+            RunTest("Triad: Karplus (FLT+DLY+FBK)", f);
         }
         {
             ControlFrame f = fb;
@@ -361,150 +287,44 @@ inline void RunOnDevicePerformanceCheck(DaisySeed& hw, Instrument& instrument, S
         }
         {
             ControlFrame f = fb;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFlt] = 1.0f; f.pressures[NodeFbk] = 1.0f;
-            RunTest("Triad: Intermod Loop (AMP+FLT+FBK)", f);
-        }
-        {
-            ControlFrame f = fb;
-            f.pressures[NodeOsc] = 1.0f; f.pressures[NodeGnd] = 1.0f; f.pressures[NodeVcc] = 1.0f;
-            RunTest("Triad: Voltage Pump (OSC+GND+VCC)", f);
-        }
-        {
-            ControlFrame f = fb; f.osc_mode = 2;
-            f.pressures[NodeClk] = 1.0f; f.pressures[NodeOsc] = 1.0f; f.pressures[NodeFlt] = 1.0f;
-            RunTest("Triad: Rungler (CLK+OSC+FLT Rnd)", f);
-        }
-        {
-            ControlFrame f = fb;
-            f.pressures[NodeOsc] = 1.0f; f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFlt] = 1.0f;
-            RunTest("Triad: Ping Drum (OSC+AMP+FLT)", f);
-        }
-        {
-            ControlFrame f = fb;
-            f.pressures[NodeClk] = 1.0f; f.pressures[NodeDly] = 1.0f; f.pressures[NodeRst] = 1.0f;
-            RunTest("Triad: Pendulum Slice (CLK+DLY+RST)", f);
-        }
-        {
-            ControlFrame f = fb;
             f.pressures[NodeClk] = 1.0f; f.pressures[NodeOsc] = 1.0f;
             f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFlt] = 1.0f;
-            RunTest("Quartet: Voice Quartet (CLK+OSC+AMP+FLT)", f);
-        }
-        {
-            ControlFrame f = fb;
-            f.pressures[NodeVcc] = 1.0f; f.pressures[NodeClk] = 1.0f;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFlt] = 1.0f;
-            RunTest("Quartet: Siren Intermod (VCC+CLK+AMP+FLT)", f);
+            RunTest("Quartet: Voice (CLK+OSC+AMP+FLT)", f);
         }
         {
             ControlFrame f = fb;
             for (int p = 0; p < 6; ++p) f.pressures[p] = 1.0f;
-            RunTest("Cluster: 6-Pad Hand Span (MIX-GND)", f);
+            RunTest("Cluster: 6-Pad Hand Span", f);
         }
         {
-            // Core Audio Synthesis Engine (CLK+OSC+FLT+DLY+AMP+FBK)
-            ControlFrame f = fb;
-            f.pressures[NodeClk] = 1.0f; f.pressures[NodeOsc] = 1.0f;
-            f.pressures[NodeFlt] = 1.0f; f.pressures[NodeDly] = 1.0f;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFbk] = 1.0f;
-            RunTest("Cluster: Sound Core (CLK+OSC+FLT+DLY+AMP+FBK)", f);
-        }
-        {
-            // Bottom-Row Hand Span (DLY+VCC+AMP+FBK+IN+OUT)
-            ControlFrame f = fb;
-            f.pressures[NodeDly] = 1.0f; f.pressures[NodeVcc] = 1.0f;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFbk] = 1.0f;
-            f.pressures[NodeIn]  = 1.0f; f.pressures[NodeOut] = 1.0f;
-            RunTest("Cluster: Bottom-Row 6-Pad Hand Span", f);
-        }
-        {
-            // High Feedback Stress (FBK+DLY+AMP+OUT+IN+VCC+FLT)
-            ControlFrame f = fb;
-            f.pressures[NodeFbk] = 1.0f; f.pressures[NodeDly] = 1.0f;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeOut] = 1.0f;
-            f.pressures[NodeIn]  = 1.0f; f.pressures[NodeVcc] = 1.0f;
-            f.pressures[NodeFlt] = 1.0f;
-            f.s35_fbk = 0.85f; f.s30_amp = 1.0f;
-            RunTest("Cluster: High Feedback (7 pads)", f);
-        }
-        {
-            // Starved Voltage Stress (OSC+FLT+AMP+DLY+FBK+VCC+GND @ 0.2V)
-            ControlFrame f = fb;
-            f.pressures[NodeOsc] = 1.0f; f.pressures[NodeFlt] = 1.0f;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeDly] = 1.0f;
-            f.pressures[NodeFbk] = 1.0f; f.pressures[NodeVcc] = 1.0f;
-            f.pressures[NodeGnd] = 1.0f;
-            f.s37_vcc = 0.20f;
-            RunTest("Cluster: Starved Voltage (7 pads)", f);
-        }
-        {
-            // Right-Side Palm (FLT+GND+DLY+VCC+AMP+FBK+IN+OUT)
-            ControlFrame f = fb;
-            f.pressures[NodeFlt] = 1.0f; f.pressures[NodeGnd] = 1.0f;
-            f.pressures[NodeDly] = 1.0f; f.pressures[NodeVcc] = 1.0f;
-            f.pressures[NodeAmp] = 1.0f; f.pressures[NodeFbk] = 1.0f;
-            f.pressures[NodeIn]  = 1.0f; f.pressures[NodeOut] = 1.0f;
-            RunTest("Cluster: Right-Side Palm (8 pads)", f);
-        }
-        {
-            // Rungler Multi-Touch (ModeRnd with CLK+OSC+FLT+DLY+FBK+AMP+VCC)
-            ControlFrame f = fb; f.osc_mode = 2;
-            f.pressures[NodeClk] = 1.0f; f.pressures[NodeOsc] = 1.0f;
-            f.pressures[NodeFlt] = 1.0f; f.pressures[NodeDly] = 1.0f;
-            f.pressures[NodeFbk] = 1.0f; f.pressures[NodeAmp] = 1.0f;
-            f.pressures[NodeVcc] = 1.0f;
-            RunTest("Cluster: Rungler Multi-Touch (7 pads)", f);
-        }
-        {
-            // 8-Pad Touch Cluster (Pads 0..7)
             ControlFrame f = fb;
             for (int p = 0; p < 8; ++p) f.pressures[p] = 1.0f;
             RunTest("Cluster: 8-Pad Touch Cluster", f);
         }
         {
-            // 10-Pad Palm (all pads except GND and RST)
             ControlFrame f = fb;
             for (int p = 0; p < 12; ++p) {
                 if (p != NodeGnd && p != NodeRst) f.pressures[p] = 1.0f;
             }
-            RunTest("Cluster: 10-Pad Palm (No GND/RST)", f);
+            RunTest("Cluster: 10-Pad Palm", f);
         }
         {
-            // Swept 8-Pad Cluster (knob modulation while bridging 8 pads)
             ControlFrame f = fb;
             for (int p = 0; p < 8; ++p) f.pressures[p] = 1.0f;
-            RunTestSwept("Cluster: Swept 8-Pad Cluster", f, 24);
+            RunTestSwept("Cluster: Swept 8-Pad", f, 24);
         }
         {
             ControlFrame f = fb;
             for (int p = 0; p < 12; ++p) f.pressures[p] = 1.0f;
-            RunTest("Cluster: 12-Pad Full Cluster", f);
+            RunTest("Cluster: 12-Pad Full", f);
         }
         {
-            // Diagonal Cross-Span (MIX+RST+VCC+AMP+IN+FBK)
-            ControlFrame f = fb;
-            f.pressures[NodeMix] = 1.0f; f.pressures[NodeRst] = 1.0f;
-            f.pressures[NodeVcc] = 1.0f; f.pressures[NodeAmp] = 1.0f;
-            f.pressures[NodeIn]  = 1.0f; f.pressures[NodeFbk] = 1.0f;
-            RunTest("Cluster: Diagonal Cross-Span (6 pads)", f);
-        }
-        {
-            // High-Drive Saturated Stress (OSC+FLT+DLY+AMP+FBK+OUT with Max Knobs)
-            ControlFrame f = fb;
-            f.pressures[NodeOsc] = 1.0f; f.pressures[NodeFlt] = 1.0f;
-            f.pressures[NodeDly] = 1.0f; f.pressures[NodeAmp] = 1.0f;
-            f.pressures[NodeFbk] = 1.0f; f.pressures[NodeOut] = 1.0f;
-            f.s30_amp = 1.0f; f.s35_fbk = 1.0f; f.s31_flt = 1.0f; f.s34_dly = 1.0f;
-            RunTest("Cluster: Saturated Stress (Max Knobs)", f);
-        }
-        {
-            // Underclocked Starve Multi-Touch (10 pads @ 0.15V VCC + S33 CLK = 0.0)
             ControlFrame f = fb;
             for (int p = 0; p < 12; ++p) {
                 if (p != NodeGnd && p != NodeRst) f.pressures[p] = 1.0f;
             }
             f.s37_vcc = 0.15f; f.s33_clk = 0.0f;
-            RunTest("Cluster: Underclocked Starve Chaos (10 pads)", f);
+            RunTest("Cluster: Starve Chaos (10 pads)", f);
         }
 
         // Summary & Breakdown

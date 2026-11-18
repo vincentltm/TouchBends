@@ -93,7 +93,7 @@ public:
 
         _heads.PrepareBlock(reg.time, target_samples, reg.speed.speed);
 
-        _cached_eff_clock = std::clamp(reg.clock.rate, 0.08f, 1.0f);
+        _cached_eff_clock = std::clamp(reg.clock.rate, 0.00002f, 1.0f);
         _converter.Prepare(_cached_eff_clock, reg.data);
         _dry_sampler.Prepare(_cached_eff_clock, reg.data);
         _feedback.PrepareBlock(reg.feedback, _knob_dly_held, _base_speed);
@@ -121,10 +121,10 @@ public:
         }
     }
 
-    __attribute__((always_inline)) inline Stereo Process(Stereo in,
-                                                         DelayRegisters& reg,
-                                                         float osc_sig,
-                                                         float in_env = 0.0f) {
+    __attribute__((noinline)) Stereo Process(Stereo in,
+                                             DelayRegisters& reg,
+                                             float osc_sig,
+                                             float in_env = 0.0f) {
         // 1. Check for requested head jumps
         if (reg.time.jump_req) {
             _heads.Jump(reg.time.jump_target, reg.time.jump_fade, reg.time.jump_loop_len);
@@ -141,8 +141,8 @@ public:
             float clock_mult = reg.clock.rate * _cached_fm_mult;
             float eff_speed = reg.clock.run ? (clock_mult * reg.speed.speed) : 0.0f;
             float abs_speed = std::abs(eff_speed);
-            if (abs_speed >= 0.005f) {
-                abs_speed = std::clamp(abs_speed, 0.02f, 2.00f);
+            if (abs_speed >= 0.00001f) {
+                abs_speed = std::clamp(abs_speed, 0.00002f, 2.00f);
                 _cached_signed_speed = (eff_speed < 0.0f) ? -abs_speed : abs_speed;
             } else {
                 _cached_signed_speed = 0.0f;

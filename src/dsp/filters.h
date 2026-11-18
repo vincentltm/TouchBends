@@ -19,7 +19,7 @@ struct DcBlocker {
     __attribute__((always_inline)) inline float Process(float in) {
         float out = in - x1 + 0.9996f * y1;
         x1 = in;
-        y1 = daisysp::fclamp(out, -4.0f, 4.0f);
+        y1 = std::clamp(out, -4.0f, 4.0f);
         return out;
     }
 };

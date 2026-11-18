@@ -41,6 +41,15 @@ public:
         _last_beat_ms = 0;
         _tempo_hz = 2.0f; // 120 BPM default
         _has_midi_clock = false;
+
+        _midi_switch_a_override = false;
+        _midi_switch_a_val = 1;
+        _last_switch_a_pos = -1;
+
+        _midi_switch_b_override = false;
+        _midi_switch_b_freeze = false;
+        _midi_switch_b_latched = false;
+        _last_switch_b_pos = -1;
     }
 
     // Called from the surface thread (~1 kHz)
@@ -85,6 +94,31 @@ public:
             if (_midi_override[i]) controls[i] = _midi_val[i];
         }
 
+        // Physical switch takeover
+        int8_t phys_switch_a = static_cast<int8_t>(frame.osc_mode);
+        if (_last_switch_a_pos < 0) {
+            _last_switch_a_pos = phys_switch_a;
+        } else if (phys_switch_a != _last_switch_a_pos) {
+            _midi_switch_a_override = false;
+            _last_switch_a_pos = phys_switch_a;
+        }
+
+        int8_t phys_switch_b = frame.is_frozen ? 1 : (frame.is_latched ? 2 : 0);
+        if (_last_switch_b_pos < 0) {
+            _last_switch_b_pos = phys_switch_b;
+        } else if (phys_switch_b != _last_switch_b_pos) {
+            _midi_switch_b_override = false;
+            _last_switch_b_pos = phys_switch_b;
+        }
+
+        if (_midi_switch_a_override) {
+            frame.osc_mode = _midi_switch_a_val;
+        }
+        if (_midi_switch_b_override) {
+            frame.is_frozen = _midi_switch_b_freeze;
+            frame.is_latched = _midi_switch_b_latched;
+        }
+
         // Slew filter for pitch portamento
         if (_num_held_notes > 0) {
             if (_is_legato) {
@@ -118,18 +152,23 @@ private:
                 _midi_val[idx] = norm;
                 _midi_override[idx] = true;
             } else if (num == 22) { // Switch A: Osc Mode
-                frame.osc_mode = (cc.value < 43) ? 0 : ((cc.value < 86) ? 1 : 2);
+                _midi_switch_a_val = (cc.value < 43) ? 0 : ((cc.value < 86) ? 1 : 2);
+                _midi_switch_a_override = true;
+                frame.osc_mode = _midi_switch_a_val;
             } else if (num == 23) { // Switch B: Memory State
+                _midi_switch_b_override = true;
                 if (cc.value < 43) {
-                    frame.is_frozen = false;
-                    frame.is_latched = false;
+                    _midi_switch_b_freeze = false;
+                    _midi_switch_b_latched = false;
                 } else if (cc.value < 86) {
-                    frame.is_frozen = false;
-                    frame.is_latched = true;
+                    _midi_switch_b_freeze = false;
+                    _midi_switch_b_latched = true;
                 } else {
-                    frame.is_frozen = true;
-                    frame.is_latched = false;
+                    _midi_switch_b_freeze = true;
+                    _midi_switch_b_latched = false;
                 }
+                frame.is_frozen = _midi_switch_b_freeze;
+                frame.is_latched = _midi_switch_b_latched;
             }
         } else if (ev.type == daisy::MidiMessageType::PitchBend) {
             auto pb = ev.AsPitchBend();
@@ -231,6 +270,15 @@ private:
     float _midi_val[8];
     bool  _midi_override[8];
     float _last_physical[8];
+
+    bool    _midi_switch_a_override{false};
+    uint8_t _midi_switch_a_val{1};
+    int8_t  _last_switch_a_pos{-1};
+
+    bool    _midi_switch_b_override{false};
+    bool    _midi_switch_b_freeze{false};
+    bool    _midi_switch_b_latched{false};
+    int8_t  _last_switch_b_pos{-1};
 
     float    _target_pitch_hz{0.0f};
     float    _slewed_pitch_hz{0.0f};

@@ -108,13 +108,23 @@ public:
         state.alone_node = _contacts.AloneNode();
         state.alone_pressure = (state.alone_node >= 0) ? _contacts.Pressure(state.alone_node) : 0.0f;
 
-        state.s30_amp = frame.s30_amp;
-        state.s31_flt = std::clamp(frame.s31_flt + state.pull[NodeFlt] * 0.20f, 0.0f, 1.0f);
-        state.s32_mix = std::clamp(frame.s32_mix + state.pull[NodeMix] * 0.20f, 0.0f, 1.0f);
-        state.s33_clk = std::clamp(frame.s33_clk + state.pull[NodeClk] * 0.20f, 0.0f, 1.0f);
-        state.s34_dly = std::clamp(frame.s34_dly + state.pull[NodeDly] * 0.20f, 0.0f, 1.0f);
-        state.s35_fbk = std::clamp(frame.s35_fbk + state.pull[NodeFbk] * 0.20f, 0.0f, 1.0f);
-        state.s36_osc = frame.s36_osc;
+        // Dynamic solver authority: scales with contact pressure and power rail starvation
+        auto calc_pull_depth = [&](NodeId id, float base_auth = 0.20f, float max_auth = 0.65f) -> float {
+            float p = _contacts.Pressure(id);
+            float auth = base_auth + p * (max_auth - base_auth);
+            if (starve > 0.10f) {
+                auth = std::min(0.85f, auth * (1.0f + starve * 0.50f));
+            }
+            return auth;
+        };
+
+        state.s30_amp = std::clamp(frame.s30_amp + state.pull[NodeAmp] * calc_pull_depth(NodeAmp, 0.20f, 0.50f), 0.0f, 1.0f);
+        state.s31_flt = std::clamp(frame.s31_flt + state.pull[NodeFlt] * calc_pull_depth(NodeFlt, 0.20f, 0.65f), 0.0f, 1.0f);
+        state.s32_mix = std::clamp(frame.s32_mix + state.pull[NodeMix] * calc_pull_depth(NodeMix, 0.20f, 0.55f), 0.0f, 1.0f);
+        state.s33_clk = std::clamp(frame.s33_clk + state.pull[NodeClk] * calc_pull_depth(NodeClk, 0.20f, 0.70f), 0.0f, 1.0f);
+        state.s34_dly = std::clamp(frame.s34_dly + state.pull[NodeDly] * calc_pull_depth(NodeDly, 0.20f, 0.60f), 0.0f, 1.0f);
+        state.s35_fbk = std::clamp(frame.s35_fbk + state.pull[NodeFbk] * calc_pull_depth(NodeFbk, 0.20f, 0.60f), 0.0f, 1.0f);
+        state.s36_osc = std::clamp(frame.s36_osc + state.pull[NodeOsc] * calc_pull_depth(NodeOsc, 0.20f, 0.65f), 0.0f, 1.0f);
 
         state.pressure_in = state.pressures[NodeIn];
         state.rub_speed_in = frame.rub_speed_p10;
@@ -161,8 +171,8 @@ public:
                            (_bend_engine.Amounts().Get(Slot::DlyChop) > 0.008f &&
                             (_bend_engine.Amounts().Get(Slot::DlyClockFm) > 0.008f ||
                              _bend_engine.Amounts().Get(Slot::DlyHeadMod) > 0.008f ||
-                             state.pressures[NodeOsc] > 0.015f ||
-                             state.g_osc_clk > 0.008f));
+                             state.g_osc_clk > 0.008f ||
+                             (_contacts.PressureLive(NodeOsc) > 0.015f && _contacts.PressureLive(NodeClk) > 0.015f)));
         dctx.osc_mode = state.osc_mode;
         dctx.osc_freq = osc_freq;
         dctx.osc_phase = osc_phase;
@@ -190,8 +200,9 @@ public:
                 g_sum[b] += br[k].g;
             }
 
-            // Starved CMOS silicon substrate leakage factor (gently scales up under starvation, strictly bounded)
-            float substrate_leak = (vcc < 0.45f) ? std::clamp((0.45f - vcc) * 0.28f, 0.0f, 0.095f) : 0.0f;
+            // Starved CMOS silicon substrate leakage factor:
+            // Opens up below nominal 0.75V, modulated by touch pressure, starvation, and audio envelope transients
+            float substrate_leak = (vcc < 0.75f) ? std::clamp((0.75f - vcc) * 0.40f + audio_envelope * 0.18f * starve, 0.0f, 0.22f) : 0.0f;
 
             float inv_y_sum[kSolverNodes]{0.0f};
 
@@ -209,15 +220,16 @@ public:
                 float gb = br[k].g * inv_y_sum[b];
 
                 if (is_routed) {
-                    // Under low voltage, allow gentle substrate crosstalk on routed bridges, strictly capped to prevent runaway howl
+                    // Under low voltage, allow substrate crosstalk on routed bridges, scaling with starvation
                     if (substrate_leak > 0.005f) {
-                        float leak_a = std::min(0.06f, ga * substrate_leak);
-                        float leak_b = std::min(0.06f, gb * substrate_leak);
+                        float leak_a = std::min(0.14f, ga * substrate_leak * 1.5f);
+                        float leak_b = std::min(0.14f, gb * substrate_leak * 1.5f);
                         state.cross_pairs[state.num_cross_pairs++] = { a, b, leak_a, leak_b };
                     }
                 } else {
                     if (ga > 0.0005f || gb > 0.0005f) {
-                        state.cross_pairs[state.num_cross_pairs++] = { a, b, std::min(0.18f, ga), std::min(0.18f, gb) };
+                        float boost = 1.0f + substrate_leak * 1.8f;
+                        state.cross_pairs[state.num_cross_pairs++] = { a, b, std::min(0.24f, ga * boost), std::min(0.24f, gb * boost) };
                     }
                 }
             }
@@ -232,7 +244,7 @@ public:
     const Solver& GetSolver() const { return _solver; }
     const AmountBus& Amounts() const { return _bend_engine.Amounts(); }
     const ModMatrix& Matrix() const { return _bend_engine.Matrix(); }
-    uint32_t ActiveBendsMask() const { return _bend_engine.ActiveBendsMask(); }
+    uint64_t ActiveBendsMask() const { return _bend_engine.ActiveBendsMask(); }
     bool FlushRequested() const { return _bend_engine.FlushRequested(); }
 
 private:

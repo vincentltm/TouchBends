@@ -24,12 +24,13 @@ public:
     }
 
     inline void Prepare(float clock_ratio, const DataRegisters& data) {
-        _lofi_l.Prepare(clock_ratio, _sample_rate);
-        _lofi_r.Prepare(clock_ratio, _sample_rate);
+        _lofi_l.Prepare(clock_ratio, _sample_rate, data.brake_amount);
+        _lofi_r.Prepare(clock_ratio, _sample_rate, data.brake_amount);
         _can_bypass = (clock_ratio >= 0.99f && data.filter_bypass <= 0.01f &&
                        _smooth_strobe_l >= 0.999f && _smooth_strobe_r >= 0.999f &&
                        data.strobe_l >= 0.999f && data.strobe_r >= 0.999f &&
-                       data.stuck_mask == 0 && data.resolution >= 16);
+                       data.stuck_mask == 0 && data.resolution >= 16 &&
+                       data.brake_amount <= 0.01f);
     }
 
     __attribute__((always_inline)) static inline Stereo ProcessDataBus(Stereo in, const DataRegisters& data, float clock_speed = 1.0f, bool enable_r2r = true) {

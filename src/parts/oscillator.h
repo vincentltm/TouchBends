@@ -37,7 +37,6 @@ public:
         _cached_target_freq = 110.0f;
         _slewed_sh = 0.0f;
         _slewed_sh_r = 0.0f;
-        _chime_idx = 0;
         _drift_phase = 0.0f;
         _drift_smooth = 0.0f;
         _snap_val = 0.0f;
@@ -112,15 +111,6 @@ public:
         // 1-pole pitch slew (~3.5ms time constant)
         _curr_freq += 0.006f * (_cached_target_freq - _curr_freq);
         float freq = _curr_freq;
-
-        if (mods.chime > 0.01f) {
-            if (clk_beat) {
-                _chime_idx = (_chime_idx + 1) % 6;
-            }
-            static constexpr float kPenta[6] = { 1.0f, 1.125f, 1.25f, 1.50f, 1.6667f, 2.0f };
-            float ch = std::min(1.0f, mods.chime);
-            freq *= (1.0f - ch) + kPenta[_chime_idx] * ch;
-        }
 
         if (__builtin_expect(std::abs(fm_input) > 0.001f, 0)) {
             _step_tick = (_step_tick + 1) & 3;
@@ -372,7 +362,6 @@ private:
     float   _cached_target_freq{110.0f};
     float   _slewed_sh{0.0f};
     float   _slewed_sh_r{0.0f};
-    uint8_t _chime_idx{0};
     uint8_t _step_tick{0};
     float   _cached_fm_mult{1.0f};
     float   _drift_phase{0.0f};

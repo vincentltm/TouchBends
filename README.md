@@ -15,6 +15,12 @@ TouchBends brings this practice into the Touch: every pad is an exposed circuit 
 
 ---
 
+## Video Manual
+
+[![TouchBends Video Manual](https://img.youtube.com/vi/HYf-jqImdlk/maxresdefault.jpg)](https://youtu.be/HYf-jqImdlk)
+
+---
+
 ## Controls
 
 <img src="manual/touchbends_layout.jpg" alt="TouchBends Layout" width="420">
@@ -24,8 +30,7 @@ TouchBends brings this practice into the Touch: every pad is an exposed circuit 
 - **FLT**: Low-pass / high-pass filter cutoff (low-pass CCW, flat bypass at noon, high-pass CW).
 - **MIX**: Dry / wet mix balance.
 - **CLK**: Delay sample rate and speed (varispeed: crunchy lo-fi downclock up to 2x speed).
-- **DLY**: Delay line length (tight comb filtering up to multi-second echoes).
-- **FBK**: Feedback amount (repeats into runaway saturation).
+- **FBK**: Feedback (center = off, CCW = mono, CW = ping-pong).
 
 ### Faders
 - **OSC (Left)**: Bending oscillator pitch (from slow LFO sweeps to audio rate).
@@ -91,12 +96,12 @@ Bridge **OSC + AMP** to hear the oscillator through the preamp.
 ### 3. Modulating Delay
 - **OSC + CLK**: Modulates delay clock for pitch vibrato, chorus, and FM sidebands.
 - **OSC + DLY**: Modulates delay time based on the oscillator waveform:
-  - **Saw**: Granular scrubbing (tape scrub at low speeds, grain clouds at high speeds).
+  - **Saw**: Granular scrubbing (buffer scrub at low speeds, grain clouds at high speeds).
   - **Sine**: Smooth back-and-forth delay time sweep.
   - **Stepped Random**: Rhythmic stutter and random tap jumps.
 
 ### 4. Bending External Audio & Delay
-Plug in a synth or drum machine (or tap the **IN** pad), and turn up **MIX**, **DLY**, and **FBK**:
+Plug in a synth or drum machine (or tap the **IN** pad), set **MIX** to taste, and turn up **DLY** and **FBK**:
 - **CLK + GND**: Pulls the clock to ground. Decelerates delay repeats into crunchy lo-fi grit; release to snap back to tempo.
 - **CLK + DLY**: Chops the delay line with the clock into rhythmic stutters.
 - **DLY + VCC**: Connects the delay to high voltage for an octave-up shimmer. Press firmly to scatter memory repeats.
@@ -105,7 +110,7 @@ Plug in a synth or drum machine (or tap the **IN** pad), and turn up **MIX**, **
 - **IN + OUT**: Direct no-input feedback loop. Sculpt the squeal with **AMP** and **FLT**.
 
 ### 5. Acoustic String Resonator
-Turn **DLY** down short (counter-clockwise) and **FBK** past 2 o'clock. Tap the **IN** pad or send in drums to turn the delay into a plucked acoustic string. Modulate the pitch with **OSC + CLK**!
+Turn **DLY** down short (counter-clockwise) and turn up **FBK**. Tap the **IN** pad or send in drums to turn the delay into a plucked acoustic string. Modulate the pitch with **OSC + CLK**!
 
 ### 6. Reverse & Reset
 - **CLK + RST**: Reverses delay playback backward through memory while writes are frozen.

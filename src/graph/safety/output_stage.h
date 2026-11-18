@@ -90,9 +90,9 @@ public:
         }
     }
 
-    __attribute__((always_inline)) inline Stereo Process(Stereo sig,
-                                                         float vcc,
-                                                         float boot_gain) {
+    __attribute__((noinline)) Stereo Process(Stereo sig,
+                                             float vcc,
+                                             float boot_gain) {
         // Subsonic highpass (22 Hz)
         _sub_decim = !_sub_decim;
         if (_sub_decim) {

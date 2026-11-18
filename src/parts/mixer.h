@@ -65,7 +65,7 @@ public:
         return (_dry_machine_morph > 0.001f || _smooth_machine_morph > 0.001f);
     }
 
-    __attribute__((always_inline)) inline void Process(
+    __attribute__((noinline)) void Process(
         float raw_l, float raw_r,
         float flt_l, float flt_r,
         float wet_l, float wet_r,

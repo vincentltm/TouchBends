@@ -23,7 +23,6 @@ X(FltWavefold,       Max, 5,  40, Block)
 X(ClkRate,           Sum, 2,  40, Audio)
 X(ClkHold,           Max, 0,  50, Block)
 X(ClkOverclock,      Max, 5,  30, Block)
-X(ClkChime,          Max, 1,  30, Block)
 X(ClkSwing,          Max, 2,  40, Block)
 
 // Oscillator
@@ -53,7 +52,6 @@ X(DlyStereoSplit,    Max, 2,  40, Block)
 
 // Delay: Feedback Path
 X(DlyPingPong,       Max, 5,  40, Block)
-X(DlySmear,          Max, 5,  60, Block)
 X(DlyRunaway,        Max, 5,  40, Block)
 X(DlyClockBurst,     Max, 1,  20, Audio)
 X(DlyFilterLoop,     Max, 5,  50, Block)

@@ -66,14 +66,30 @@ struct MultiTouchTopology {
         touch_mask = 0;
         active_node_count = 0;
 
+        uint16_t live_mask = 0;
+        uint8_t  live_count = 0;
+        uint16_t latched_mask = 0;
+        uint8_t  latched_count = 0;
+
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
-            if (contacts.Pressure(i) > 0.025f) {
+            float p_eff = contacts.Pressure(i);
+            if (p_eff > 0.025f) {
                 touch_mask |= static_cast<uint16_t>(1u << i);
                 active_node_count++;
             }
+            if (contacts.PressureLive(i) > 0.025f) {
+                live_mask |= static_cast<uint16_t>(1u << i);
+                live_count++;
+            }
+            if (contacts.LatchedPressure(i) > 0.025f) {
+                latched_mask |= static_cast<uint16_t>(1u << i);
+                latched_count++;
+            }
         }
 
-        // Conductance normalization: scales pairwise gain when 3+ pads are touched
+        // Conductance normalization: scales pairwise gain when 3+ pads are touched.
+        // When latching is active, scale by live gesture or latched gesture independently
+        // so playing a live 2-pad bend does not drop the gain of a latched 2-pad bend.
         static constexpr float kNormScale[13] = {
             1.0f, 1.0f, 1.0f,
             0.70710678f, // 3: 1/sqrt(2)
@@ -87,7 +103,10 @@ struct MultiTouchTopology {
             0.31622777f, // 11: 1/sqrt(10)
             0.30151134f  // 12: 1/sqrt(11)
         };
-        norm_scale = kNormScale[std::min(active_node_count, static_cast<uint8_t>(12))];
+        uint8_t eff_norm_count = (contacts.HasLatchedSnapshot() && live_count > 0)
+                                    ? std::max(live_count, latched_count)
+                                    : active_node_count;
+        norm_scale = kNormScale[std::min(eff_norm_count, static_cast<uint8_t>(12))];
 
         // Cluster galvanic rail load (draws down VCC on 4+ pads)
         if (active_node_count >= 4) {
@@ -96,21 +115,28 @@ struct MultiTouchTopology {
             cluster_load = 0.0f;
         }
 
-        // Flexible subset matching: holding 4 or more fingers layers with 3-finger modes
-        pendulum_slice    = (touch_mask & TopologyMasks::kPendulumSlice) == TopologyMasks::kPendulumSlice;
-        karplus_resonator = (touch_mask & TopologyMasks::kKarplusResonator) == TopologyMasks::kKarplusResonator;
-        clock_siren       = (touch_mask & TopologyMasks::kClockSiren) == TopologyMasks::kClockSiren;
-        voltage_pump      = (touch_mask & TopologyMasks::kVoltagePump) == TopologyMasks::kVoltagePump;
-        intermod_loop     = (touch_mask & TopologyMasks::kIntermodLoop) == TopologyMasks::kIntermodLoop;
-        voice_quartet     = (touch_mask & TopologyMasks::kVoiceQuartet) == TopologyMasks::kVoiceQuartet;
-        clk_amp_flt       = (touch_mask & TopologyMasks::kClkAmpFlt) == TopologyMasks::kClkAmpFlt;
-        ping_drum_triad   = (touch_mask & TopologyMasks::kPingDrumTriad) == TopologyMasks::kPingDrumTriad;
+        // Chord topologies represent intentional multi-finger gestures.
+        // A chord triggers if the player touches all pads together live, OR
+        // if the chord was latched together as a unit snapshot. Disjoint pads
+        // (e.g. latched OSC+AMP with live CLK+DLY) do NOT trigger phantom chords.
+        auto check_chord = [&](uint16_t mask) -> bool {
+            if ((live_mask & mask) == mask) return true;
+            if (contacts.HasLatchedSnapshot() && (latched_mask & mask) == mask) return true;
+            return false;
+        };
 
-        // Delicate 3-pad micro-interactions: active up to 6 pads; in massive clusters (7+ pads),
-        // cluster drone modes take precedence to protect CPU headroom.
+        pendulum_slice    = check_chord(TopologyMasks::kPendulumSlice);
+        karplus_resonator = check_chord(TopologyMasks::kKarplusResonator);
+        clock_siren       = check_chord(TopologyMasks::kClockSiren);
+        voltage_pump      = check_chord(TopologyMasks::kVoltagePump);
+        intermod_loop     = check_chord(TopologyMasks::kIntermodLoop);
+        voice_quartet     = check_chord(TopologyMasks::kVoiceQuartet);
+        clk_amp_flt       = check_chord(TopologyMasks::kClkAmpFlt);
+        ping_drum_triad   = check_chord(TopologyMasks::kPingDrumTriad);
+
         if (active_node_count <= 6) {
-            lissajous_cloud   = (touch_mask & TopologyMasks::kLissajousCloud) == TopologyMasks::kLissajousCloud;
-            rungler_triad    = (touch_mask & TopologyMasks::kRunglerTriad) == TopologyMasks::kRunglerTriad;
+            lissajous_cloud   = check_chord(TopologyMasks::kLissajousCloud);
+            rungler_triad    = check_chord(TopologyMasks::kRunglerTriad);
         } else {
             lissajous_cloud   = false;
             rungler_triad    = false;

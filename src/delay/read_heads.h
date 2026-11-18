@@ -46,6 +46,8 @@ public:
         _pending_jump_fade = tuning::kXfadeSamples;
         _pending_jump_loop = 0.0f;
         _initialized = false;
+        std::memset(_spread_buf, 0, sizeof(_spread_buf));
+        _spread_w = 0;
     }
 
     void SetTargetSamples(float target) {
@@ -304,17 +306,29 @@ public:
         // Loop window phase advancement
         if (time_reg.has_loop) {
             float active_len = (_active_head == 0) ? _len_a : _len_b;
-            if (active_len > 48.0f) {
+            if (__builtin_expect(active_len > 48.0f, 1)) {
                 if (_xfade_active) {
-                    _phase_a = FastWrap(_phase_a + read_speed, _len_a, _inv_len_a);
-                    _phase_b = FastWrap(_phase_b + read_speed, _len_b, _inv_len_b);
+                    _phase_a += read_speed;
+                    if (__builtin_expect(_phase_a >= _len_a, 0)) _phase_a -= _len_a;
+                    else if (__builtin_expect(_phase_a < 0.0f, 0)) _phase_a += _len_a;
+
+                    _phase_b += read_speed;
+                    if (__builtin_expect(_phase_b >= _len_b, 0)) _phase_b -= _len_b;
+                    else if (__builtin_expect(_phase_b < 0.0f, 0)) _phase_b += _len_b;
+
                     _head_a = _anchor_a + _len_a - _phase_a;
                     _head_b = _anchor_b + _len_b - _phase_b;
                 } else if (_active_head == 0) {
-                    _phase_a = FastWrap(_phase_a + read_speed, _len_a, _inv_len_a);
+                    _phase_a += read_speed;
+                    if (__builtin_expect(_phase_a >= _len_a, 0)) _phase_a -= _len_a;
+                    else if (__builtin_expect(_phase_a < 0.0f, 0)) _phase_a += _len_a;
+
                     _head_a = _anchor_a + _len_a - _phase_a;
                 } else {
-                    _phase_b = FastWrap(_phase_b + read_speed, _len_b, _inv_len_b);
+                    _phase_b += read_speed;
+                    if (__builtin_expect(_phase_b >= _len_b, 0)) _phase_b -= _len_b;
+                    else if (__builtin_expect(_phase_b < 0.0f, 0)) _phase_b += _len_b;
+
                     _head_b = _anchor_b + _len_b - _phase_b;
                 }
             }
@@ -476,21 +490,17 @@ public:
                     Stereo sb = mem.ReadDistance(pos_b);
                     normal_out = sa * gain_a + sb * gain_b;
                 }
+                if (__builtin_expect(_has_stereo_spread, 0)) {
+                    float spread_d = _has_stereo_split ? _cached_haas_offset : _smooth_skew;
+                    normal_out.r = ProcessSpread(normal_out.r, spread_d);
+                }
             } else {
                 float pos_base = (_active_head == 0) ? _head_a : _head_b;
-                if (__builtin_expect(!_has_stereo_spread, 1)) {
-                    float pos = std::clamp(pos_base + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
-                    normal_out = mem.ReadDistance(pos);
-                } else if (_has_stereo_split) {
-                    float pos_l = std::clamp(pos_base + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
-                    float pos_r = std::clamp(pos_base + eff_mod + _cached_haas_offset,
-                                             tuning::kMinDelaySamples, kMaxDelay);
-                    normal_out = mem.ReadDistanceSplit(pos_l, pos_r);
-                } else {
-                    float pos_l = std::clamp(pos_base + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
-                    float pos_r = std::clamp(pos_base + eff_mod + _smooth_skew,
-                                             tuning::kMinDelaySamples, kMaxDelay);
-                    normal_out = mem.ReadDistanceSplit(pos_l, pos_r);
+                float pos = std::clamp(pos_base + eff_mod, tuning::kMinDelaySamples, kMaxDelay);
+                normal_out = mem.ReadDistance(pos);
+                if (__builtin_expect(_has_stereo_spread, 0)) {
+                    float spread_d = _has_stereo_split ? _cached_haas_offset : _smooth_skew;
+                    normal_out.r = ProcessSpread(normal_out.r, spread_d);
                 }
             }
         }
@@ -588,6 +598,22 @@ private:
     float    _pending_jump_tgt{0.0f};
     uint16_t _pending_jump_fade{tuning::kXfadeSamples};
     float    _pending_jump_loop{0.0f};
+
+    static constexpr size_t kSpreadBufSize = 1024;
+    float    _spread_buf[kSpreadBufSize];
+    uint16_t _spread_w{0};
+
+    __attribute__((always_inline)) inline float ProcessSpread(float in_r, float delay_samples) {
+        float ds = std::clamp(delay_samples, 0.0f, static_cast<float>(kSpreadBufSize - 2));
+        _spread_buf[_spread_w] = in_r;
+        float r_pos = static_cast<float>(_spread_w) - ds;
+        if (__builtin_expect(r_pos < 0.0f, 0)) r_pos += static_cast<float>(kSpreadBufSize);
+        uint32_t idx0 = static_cast<uint32_t>(r_pos) & (kSpreadBufSize - 1);
+        uint32_t idx1 = (idx0 + 1) & (kSpreadBufSize - 1);
+        float frac = r_pos - static_cast<float>(static_cast<uint32_t>(r_pos));
+        _spread_w = (_spread_w + 1) & (kSpreadBufSize - 1);
+        return _spread_buf[idx0] + frac * (_spread_buf[idx1] - _spread_buf[idx0]);
+    }
 };
 
 } // namespace bends

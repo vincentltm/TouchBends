@@ -61,8 +61,8 @@ public:
 
     __attribute__((always_inline)) inline void Write(Stereo s, bool write_enable, float rot_depth, float speed = 1.0f) {
         if (!_buffer || _clearing) return;
-        s.l = daisysp::fclamp(s.l, -4.0f, 4.0f);
-        s.r = daisysp::fclamp(s.r, -4.0f, 4.0f);
+        s.l = std::clamp(s.l, -4.0f, 4.0f);
+        s.r = std::clamp(s.r, -4.0f, 4.0f);
 
         // Low-voltage DRAM bit corruption & cell charge leakage
         if (rot_depth > 0.05f) {
@@ -76,15 +76,15 @@ public:
                 _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
                 uint32_t bit_l = 4u + (_rng & 0x07);
                 uint32_t bit_r = 4u + ((_rng >> 3) & 0x07);
-                uint32_t ul = static_cast<uint32_t>(static_cast<int32_t>(daisysp::fclamp(s.l, -1.0f, 1.0f) * 32767.0f) + 32768) ^ (1 << bit_l);
-                uint32_t ur = static_cast<uint32_t>(static_cast<int32_t>(daisysp::fclamp(s.r, -1.0f, 1.0f) * 32767.0f) + 32768) ^ (1 << bit_r);
+                uint32_t ul = static_cast<uint32_t>(static_cast<int32_t>(std::clamp(s.l, -1.0f, 1.0f) * 32767.0f) + 32768) ^ (1 << bit_l);
+                uint32_t ur = static_cast<uint32_t>(static_cast<int32_t>(std::clamp(s.r, -1.0f, 1.0f) * 32767.0f) + 32768) ^ (1 << bit_r);
                 s.l = static_cast<float>(static_cast<int32_t>(ul) - 32768) * (1.0f / 32767.0f);
                 s.r = static_cast<float>(static_cast<int32_t>(ur) - 32768) * (1.0f / 32767.0f);
             }
         }
 
         if (write_enable) {
-            float eff_write_speed = std::clamp(speed, 0.02f, 2.05f);
+            float eff_write_speed = std::clamp(speed, 0.00002f, 2.05f);
 
             if (__builtin_expect(std::abs(eff_write_speed - 1.0f) < 0.001f, 1)) {
                 _write_idx = (_write_idx + 1) & kMask;
@@ -174,12 +174,11 @@ public:
     }
 
     __attribute__((always_inline)) inline Stereo ReadDistance(float distance_samples) const {
-        if (!_buffer || _clearing) return {0.0f, 0.0f};
-        int32_t dist_i = static_cast<int32_t>(distance_samples);
-        float dist_f = distance_samples - static_cast<float>(dist_i);
-        float frac = _write_frac - dist_f;
-        int32_t i_pos = static_cast<int32_t>(_write_idx) - dist_i;
-        if (frac < 0.0f) {
+        if (__builtin_expect(!_buffer || _clearing, 0)) return {0.0f, 0.0f};
+        float exact_pos = (static_cast<float>(_write_idx) + _write_frac) - distance_samples;
+        int32_t i_pos = static_cast<int32_t>(exact_pos);
+        float frac = exact_pos - static_cast<float>(i_pos);
+        if (__builtin_expect(frac < 0.0f, 0)) {
             frac += 1.0f;
             i_pos -= 1;
         }
@@ -195,27 +194,27 @@ public:
     }
 
     __attribute__((always_inline)) inline Stereo ReadDistanceSplit(float dist_l, float dist_r) const {
-        if (!_buffer || _clearing) return {0.0f, 0.0f};
-        int32_t dl_i = static_cast<int32_t>(dist_l);
-        float dl_f = dist_l - static_cast<float>(dl_i);
-        float frac_l = _write_frac - dl_f;
-        int32_t pos_l = static_cast<int32_t>(_write_idx) - dl_i;
-        if (frac_l < 0.0f) {
+        if (__builtin_expect(!_buffer || _clearing, 0)) return {0.0f, 0.0f};
+        float cur_w = static_cast<float>(_write_idx) + _write_frac;
+
+        float pos_l = cur_w - dist_l;
+        int32_t il = static_cast<int32_t>(pos_l);
+        float frac_l = pos_l - static_cast<float>(il);
+        if (__builtin_expect(frac_l < 0.0f, 0)) {
             frac_l += 1.0f;
-            pos_l -= 1;
+            il -= 1;
         }
-        uint32_t idx_l0 = static_cast<uint32_t>(pos_l) & kMask;
+        uint32_t idx_l0 = static_cast<uint32_t>(il) & kMask;
         uint32_t idx_l1 = (idx_l0 + 1) & kMask;
 
-        int32_t dr_i = static_cast<int32_t>(dist_r);
-        float dr_f = dist_r - static_cast<float>(dr_i);
-        float frac_r = _write_frac - dr_f;
-        int32_t pos_r = static_cast<int32_t>(_write_idx) - dr_i;
-        if (frac_r < 0.0f) {
+        float pos_r = cur_w - dist_r;
+        int32_t ir = static_cast<int32_t>(pos_r);
+        float frac_r = pos_r - static_cast<float>(ir);
+        if (__builtin_expect(frac_r < 0.0f, 0)) {
             frac_r += 1.0f;
-            pos_r -= 1;
+            ir -= 1;
         }
-        uint32_t idx_r0 = static_cast<uint32_t>(pos_r) & kMask;
+        uint32_t idx_r0 = static_cast<uint32_t>(ir) & kMask;
         uint32_t idx_r1 = (idx_r0 + 1) & kMask;
 
         const Stereo& sl0 = _buffer[idx_l0];
@@ -230,12 +229,11 @@ public:
     }
 
     __attribute__((always_inline)) inline float ReadDistanceL(float distance_samples) const {
-        if (!_buffer || _clearing) return 0.0f;
-        int32_t dist_i = static_cast<int32_t>(distance_samples);
-        float dist_f = distance_samples - static_cast<float>(dist_i);
-        float frac = _write_frac - dist_f;
-        int32_t i_pos = static_cast<int32_t>(_write_idx) - dist_i;
-        if (frac < 0.0f) {
+        if (__builtin_expect(!_buffer || _clearing, 0)) return 0.0f;
+        float exact_pos = (static_cast<float>(_write_idx) + _write_frac) - distance_samples;
+        int32_t i_pos = static_cast<int32_t>(exact_pos);
+        float frac = exact_pos - static_cast<float>(i_pos);
+        if (__builtin_expect(frac < 0.0f, 0)) {
             frac += 1.0f;
             i_pos -= 1;
         }
@@ -245,12 +243,11 @@ public:
     }
 
     __attribute__((always_inline)) inline float ReadDistanceR(float distance_samples) const {
-        if (!_buffer || _clearing) return 0.0f;
-        int32_t dist_i = static_cast<int32_t>(distance_samples);
-        float dist_f = distance_samples - static_cast<float>(dist_i);
-        float frac = _write_frac - dist_f;
-        int32_t i_pos = static_cast<int32_t>(_write_idx) - dist_i;
-        if (frac < 0.0f) {
+        if (__builtin_expect(!_buffer || _clearing, 0)) return 0.0f;
+        float exact_pos = (static_cast<float>(_write_idx) + _write_frac) - distance_samples;
+        int32_t i_pos = static_cast<int32_t>(exact_pos);
+        float frac = exact_pos - static_cast<float>(i_pos);
+        if (__builtin_expect(frac < 0.0f, 0)) {
             frac += 1.0f;
             i_pos -= 1;
         }

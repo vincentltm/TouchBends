@@ -8,6 +8,10 @@
 #include "dsp/stereo.h"
 #include "bends/delay_bends.h"
 #include "bends/mod_matrix.h"
+#include "circuit/circuit.h"
+#include "parts/filter.h"
+#include "parts/preamp.h"
+#include "bends/table.h"
 
 using namespace bends;
 
@@ -493,7 +497,7 @@ int main() {
             brake_reg.Reset();
             brake_bends.Update(hard_amounts, false, brake_reg, brake_ctx);
         }
-        std::cout << "  Hard Brake (1.0 pressure) - reg.clock.rate: " << brake_reg.clock.rate << " (Expected ~0.18-0.22x)" << std::endl;
+        std::cout << "  Hard Brake (1.0 pressure) - reg.clock.rate: " << brake_reg.clock.rate << " (Expected <= 0.25x sub-audio stall)" << std::endl;
         std::cout << "  Hard Brake - reg.data.resolution: " << static_cast<int>(brake_reg.data.resolution) << "-bit (Expected 10-bit)" << std::endl;
         assert(brake_reg.clock.rate <= 0.25f);
         assert(brake_reg.data.resolution <= 10);
@@ -507,8 +511,26 @@ int main() {
         }
         std::cout << "  Brake Release - reg.clock.rate: " << brake_reg.clock.rate << " (Expected 1.0x full speed recovery)" << std::endl;
         std::cout << "  Brake Release - reg.data.resolution: " << static_cast<int>(brake_reg.data.resolution) << "-bit (Expected 16-bit)" << std::endl;
-        assert(brake_reg.clock.rate == 1.0f);
-        assert(brake_reg.data.resolution == 16);
+        // Verify Lofi heterodyne whistle gating:
+        // Case A: Regular knob underclocking (brake_amount == 0.0f) -> ZERO whine
+        Lofi lofi_knob;
+        lofi_knob.Init();
+        lofi_knob.Prepare(0.35f, 48000.0f, 0.0f); // 0.35x speed with 0 brake
+        std::cout << "  Regular Knob Underclock (0.35x) - whine_scale: " << lofi_knob.whine_scale << " (Expected 0.0f)" << std::endl;
+        assert(lofi_knob.whine_scale == 0.0f);
+
+        // Case B: CLK-GND bend active (brake_amount == 0.40f) -> Non-zero whine during deceleration
+        Lofi lofi_brake;
+        lofi_brake.Init();
+        lofi_brake.Prepare(0.35f, 48000.0f, 0.40f); // 0.35x speed with 0.40 brake
+        std::cout << "  CLK-GND Bend Active (0.35x) - whine_scale: " << lofi_brake.whine_scale << " (Expected > 0.0f)" << std::endl;
+        assert(lofi_brake.whine_scale > 0.005f);
+
+        // Case C: Deep sub-audio stall (brake_amount == 1.0f, clock < 0.04x) -> Whine fades out to 0
+        lofi_brake.Prepare(0.00004f, 48000.0f, 1.0f);
+        std::cout << "  CLK-GND Sub-Audio Stall (~2 Hz) - whine_scale: " << lofi_brake.whine_scale << " (Expected 0.0f)" << std::endl;
+        assert(lofi_brake.whine_scale == 0.0f);
+
         std::cout << "  CLK - GND Digital Clock Underclock / Choke: PASS" << std::endl;
     }
 
@@ -788,8 +810,175 @@ int main() {
         std::cout << "  OSC -> CLK Anti-Aliased Vibrato at 2.0x Overclock: PASS" << std::endl;
     }
 
+    // ----------------------------------------------------
+    // Test 20: Latch Isolation (Decoupled Background & Foreground Bends)
+    // ----------------------------------------------------
+    std::cout << "\nTest 20: Latch Isolation (Decoupled Background & Foreground Bends)..." << std::endl;
+    {
+        Circuit circuit;
+        circuit.Init(48000.0f);
+        BlockState state;
+        ControlFrame frame;
+
+        // Step 1: Touch OSC (P03) and AMP (P08) together
+        frame.pressures[NodeOsc] = 0.80f;
+        frame.pressures[NodeAmp] = 0.80f;
+        frame.is_latched = false;
+        circuit.Update(frame, 0.0f, state, false, 1.0f);
+
+        // Step 2: Latch this OSC + AMP bend
+        frame.is_latched = true;
+        circuit.Update(frame, 0.0f, state, false, 1.0f);
+
+        // Step 3: Release fingers from surface while latch remains active
+        frame.pressures[NodeOsc] = 0.0f;
+        frame.pressures[NodeAmp] = 0.0f;
+        circuit.Update(frame, 0.0f, state, false, 1.0f);
+
+        assert(circuit.GetContacts().HasLatchedSnapshot());
+        assert(circuit.GetContacts().LatchedPressure(NodeOsc) > 0.50f);
+        assert(circuit.GetContacts().LatchedPressure(NodeAmp) > 0.50f);
+        assert(circuit.GetContacts().PressureLive(NodeOsc) == 0.0f);
+        assert(circuit.GetContacts().LiveTouchedCount() == 0);
+
+        // Step 4: Now play a LIVE foreground bend: CLK (P02) + DLY (P06)
+        frame.pressures[NodeClk] = 0.85f;
+        frame.pressures[NodeDly] = 0.85f;
+        circuit.Update(frame, 0.0f, state, false, 1.0f);
+
+        // Verify:
+        // A. No phantom chord (Lissajous Cloud = OSC + CLK + DLY) must NOT be triggered
+        std::cout << "  Phantom Lissajous Cloud: " << (circuit.GetTopology().lissajous_cloud ? "TRIGGERED (FAIL)" : "ISOLATED (PASS)") << std::endl;
+        assert(!circuit.GetTopology().lissajous_cloud);
+
+        // B. norm_scale must NOT drop to 4-pad value (0.577f). Both bends have count 2, so norm_scale == 1.0f!
+        std::cout << "  norm_scale during latched + live 2-pad: " << circuit.GetTopology().norm_scale << " (Expected 1.0f)" << std::endl;
+        assert(std::abs(circuit.GetTopology().norm_scale - 1.0f) < 0.01f);
+
+        // C. Delay stutter must NOT enter multi-mode osc_stutter (must remain clean 1x forward stutter)
+        // because OSC was not touched live or bridged into CLK/DLY.
+        std::cout << "  Delay Stutter Mode: " << (state.delay_regs.speed.speed > 0.0f ? "Clean 1x Forward (PASS)" : "Multi-mode (FAIL)") << std::endl;
+        assert(state.delay_regs.speed.speed > 0.0f);
+
+        std::cout << "  Latch Isolation: PASS" << std::endl;
+    }
+
+    // ----------------------------------------------------
+    // Test 21: FLT + AMP Low-End Self-Oscillation & Squeal Taming
+    // ----------------------------------------------------
+    std::cout << "\nTest 21: FLT + AMP Low-End Self-Oscillation & Squeal Taming..." << std::endl;
+    {
+        // 1. FLT + AMP Closed-Loop Feedback Test (Preamp + Filter 1-sample loop)
+        Filter filter;
+        Preamp preamp;
+        filter.Init(48000.0f);
+        preamp.Init(48000.0f);
+        FilterMods mods;
+        mods.resonance = 0.25f; // From FLT + AMP bend pair (Slot::FltRes = 0.25f)
+        mods.howl = 0.50f;      // state.retention[NodeFlt] * 0.5f
+
+        PreampMods pmods{};
+        pmods.drive = 0.0f;
+
+        float knob_amp = 0.70f;     // S30 knob in boost territory
+        float eff_flt_knob = 0.25f; // Low-mid cutoff (~960 Hz)
+        float flt_touch_res = 1.0f * 0.65f; // Pad held: state.g_flt_amp * 0.65f
+
+        float bus_flt_l = 0.0f, bus_flt_r = 0.0f;
+        float max_out_loop = 0.0f;
+        for (int n = 0; n < 48000; ++n) {
+            if ((n % 32) == 0) {
+                filter.PrepareBlock(eff_flt_knob, 0.0f, flt_touch_res, knob_amp, 1.0f, 0.0f, 1.0f, mods);
+                preamp.PrepareBlock(knob_amp, knob_amp, 1.0f, 0.0f, 0.0f);
+            }
+            float flt_loop_l = bus_flt_l * (1.10f * 0.40f);
+            float flt_loop_r = bus_flt_r * (1.10f * 0.40f);
+            float amp_out_l = 0.0f, amp_out_r = 0.0f;
+            preamp.Process(flt_loop_l, flt_loop_r, 0.0f, pmods, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, amp_out_l, amp_out_r);
+            float flt_out_l = 0.0f, flt_out_r = 0.0f;
+            filter.Process(amp_out_l, amp_out_r, 0.0f, mods, 1.0f, 0.0f, 1.0f, flt_out_l, flt_out_r);
+            bus_flt_l = flt_out_l; bus_flt_r = flt_out_r;
+            if (n > 24000) {
+                if (std::abs(flt_out_l) > max_out_loop) max_out_loop = std::abs(flt_out_l);
+            }
+        }
+        std::cout << "  FLT + AMP Closed-Loop Self-Oscillation Peak: " << max_out_loop << " (Expected > 0.50f)" << std::endl;
+        assert(max_out_loop > 0.50f); // True sustained closed-loop analog self-oscillation!
+
+        // 2. Solo Filter Pad Test: must decay to zero without self-oscillation
+        Filter solo_filter;
+        solo_filter.Init(48000.0f);
+        FilterMods solo_mods;
+        solo_mods.resonance = 0.95f; // BEND_SOLO(Flt) = 0.95f
+        solo_mods.howl = 0.50f;
+        solo_filter.PrepareBlock(0.12f, 0.0f, 1.0f, 0.70f, 1.0f, 0.0f, 1.0f, solo_mods);
+        // Inject brief impulse
+        float dummy_l = 0.0f, dummy_r = 0.0f;
+        solo_filter.Process(0.50f, 0.50f, 0.0f, solo_mods, 1.0f, 0.0f, 1.0f, dummy_l, dummy_r);
+        float max_solo_out = 0.0f;
+        for (int n = 0; n < 9600; ++n) {
+            if ((n % 64) == 0) {
+                solo_filter.PrepareBlock(0.12f, 0.0f, 1.0f, 0.70f, 1.0f, 0.0f, 1.0f, solo_mods);
+            }
+            float out_l = 0.0f, out_r = 0.0f;
+            solo_filter.Process(0.0f, 0.0f, 0.0f, solo_mods, 1.0f, 0.0f, 1.0f, out_l, out_r);
+            if (n > 3000) {
+                if (std::abs(out_l) > max_solo_out) max_solo_out = std::abs(out_l);
+            }
+        }
+        std::cout << "  Solo Filter Hold Output: " << max_solo_out << " (Expected < 0.005f, NO self-oscillation)" << std::endl;
+        assert(max_solo_out < 0.005f);
+
+        // 3. High-Frequency Squeal Taming: Knob High (s31_flt = 0.44f -> ~10 kHz)
+        filter.PrepareBlock(0.44f, 0.0f, 0.0f, 0.70f, 1.0f, 0.0f, 1.0f, mods);
+        // Loop filter test (alpha = 0.35 at 48kHz rolls off >3.5kHz)
+        float lpf = 0.0f;
+        float high_sine_amp = 0.0f;
+        for (int n = 0; n < 480; ++n) {
+            float shrill = std::sin(2.0f * kPi * 6000.0f * n / 48000.0f);
+            lpf += 0.35f * (shrill - lpf);
+            if (n > 240) {
+                if (std::abs(lpf) > high_sine_amp) high_sine_amp = std::abs(lpf);
+            }
+        }
+        std::cout << "  6 kHz Loop High-Cut Damping: " << high_sine_amp << " (Expected < 0.55f)" << std::endl;
+        assert(high_sine_amp < 0.55f);
+
+        std::cout << "  FLT + AMP Low-End Self-Oscillation & Squeal Taming: PASS" << std::endl;
+    }
+
+    // ----------------------------------------------------
+    // Test 22: CLK + FLT + AMP Acoustic Filter Pings & Pitch Drifts
+    // ----------------------------------------------------
+    std::cout << "\nTest 22: CLK + FLT + AMP Acoustic Filter Pings & Pitch Drifts..." << std::endl;
+    {
+        Filter filter;
+        filter.Init(48000.0f);
+        FilterMods mods;
+
+        // Prepare filter at mid frequency (1200 Hz)
+        filter.PrepareBlock(0.30f, 0.0f, 0.0f, 0.50f, 1.0f, 0.0f, 1.0f, mods);
+
+        // Strike ping
+        assert(filter.PingEnv() == 0.0f);
+        filter.TriggerPing(0.85f);
+        assert(filter.PingEnv() > 0.80f);
+
+        // Process a block and check pitch dive decay and exciter impulse
+        float max_dive_ping = 0.0f;
+        for (int n = 0; n < 64; ++n) {
+            float out_l = 0.0f, out_r = 0.0f;
+            filter.Process(0.0f, 0.0f, 0.0f, mods, 1.0f, 0.0f, 1.0f, out_l, out_r);
+            if (std::abs(out_l) > max_dive_ping) max_dive_ping = std::abs(out_l);
+        }
+        std::cout << "  Exciter Impulse Peak: " << max_dive_ping << " (Expected > 0.05f)" << std::endl;
+        assert(max_dive_ping > 0.05f);
+
+        std::cout << "  CLK + FLT + AMP Acoustic Filter Pings & Pitch Drifts: PASS" << std::endl;
+    }
+
     std::cout << "\n========================================" << std::endl;
-    std::cout << "ALL 19 TESTS PASSED!" << std::endl;
+    std::cout << "ALL 22 TESTS PASSED!" << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

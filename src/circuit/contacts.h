@@ -33,6 +33,7 @@ public:
         _total_current_load = 0.0f;
         _dynamic_motion = 0.0f;
         _digital_motion_ratio = 0.0f;
+        _live_touched = 0;
 
         for (size_t i = 0; i < kSolverNodes; ++i) {
             _pressures[i] = 0.0f;
@@ -43,7 +44,9 @@ public:
             }
         }
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
+            _live_pressures[i] = 0.0f;
             _prev_pressures[i] = 0.0f;
+            _sweat_drift[i] = 0.0f;
         }
         _crackle_seed = 0x9E3779B9u;
     }
@@ -54,6 +57,19 @@ public:
         float sum_g = 0.0f;
 
         bool is_latched = frame.is_latched;
+
+        // 0. Update bio-galvanic contact mechanics:
+        // Fingertip perspiration accumulation under contact pressure, slow moisture evaporation on release
+        float eff_live_p[kPhysicalNodes];
+        for (size_t i = 0; i < kPhysicalNodes; ++i) {
+            float raw = frame.pressures[i];
+            if (raw > tuning::kTouchThreshold) {
+                _sweat_drift[i] += 0.0015f * (0.24f * raw - _sweat_drift[i]);
+            } else {
+                _sweat_drift[i] *= 0.995f;
+            }
+            eff_live_p[i] = std::clamp(raw + _sweat_drift[i], 0.0f, 1.0f);
+        }
 
         // 1. Calculate live physical bridges between pairs touched simultaneously
         float live_g[kPhysicalNodes][kPhysicalNodes] = {{0.0f}};
@@ -66,10 +82,11 @@ public:
         float total_motion = 0.0f;
         float digital_motion = 0.0f;
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
-            float pi = frame.pressures[i];
+            float pi = eff_live_p[i];
             delta_p[i] = std::abs(pi - _prev_pressures[i]);
             _prev_pressures[i] = pi;
 
+            _live_pressures[i] = pi;
             if (pi > tuning::kTouchThreshold) {
                 touched_idx[live_touched++] = static_cast<uint8_t>(i);
                 live_alone = static_cast<int8_t>(i);
@@ -82,6 +99,7 @@ public:
                 }
             }
         }
+        _live_touched = live_touched;
         _dynamic_motion = total_motion;
         _digital_motion_ratio = (total_motion > 0.001f) ? (digital_motion / total_motion) : 0.0f;
 
@@ -89,10 +107,10 @@ public:
             const float inv_sum_touched_p = (sum_touched_p > 0.001f) ? (1.0f / sum_touched_p) : 1.0f;
             for (uint8_t ti = 0; ti < live_touched; ++ti) {
                 uint8_t i = touched_idx[ti];
-                float pi = frame.pressures[i];
+                float pi = eff_live_p[i];
                 for (uint8_t tj = ti + 1; tj < live_touched; ++tj) {
                     uint8_t j = touched_idx[tj];
-                    float pj = frame.pressures[j];
+                    float pj = eff_live_p[j];
                     float p_sum = pi + pj;
                     float num = 2.0f * pi * pj;
                     float p_direct = (std::abs(pi - pj) < 0.005f) ? pi : (num / p_sum);
@@ -119,8 +137,8 @@ public:
             _was_touching_in_latch = (live_touched > 0);
             if (live_touched > 0) {
                 for (size_t i = 0; i < kPhysicalNodes; ++i) {
-                    if (frame.pressures[i] > tuning::kTouchThreshold) {
-                        _latched_pressures[i] = frame.pressures[i];
+                    if (eff_live_p[i] > tuning::kTouchThreshold) {
+                        _latched_pressures[i] = eff_live_p[i];
                     }
                     for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                         if ((i == NodeGnd && j == NodeVcc) || (i == NodeVcc && j == NodeGnd)) continue; // Never latch power rail short
@@ -135,8 +153,8 @@ public:
             if (!_has_latched_snapshot) {
                 if (live_touched > 0) {
                     for (size_t i = 0; i < kPhysicalNodes; ++i) {
-                        if (frame.pressures[i] > tuning::kTouchThreshold) {
-                            _latched_pressures[i] = std::max(_latched_pressures[i], frame.pressures[i]);
+                        if (eff_live_p[i] > tuning::kTouchThreshold) {
+                            _latched_pressures[i] = std::max(_latched_pressures[i], eff_live_p[i]);
                         }
                         for (size_t j = i + 1; j < kPhysicalNodes; ++j) {
                             if ((i == NodeGnd && j == NodeVcc) || (i == NodeVcc && j == NodeGnd)) continue; // Never latch power rail short
@@ -219,7 +237,7 @@ public:
         int8_t latched_alone = -1;
         uint8_t active_nodes = 0;
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
-            float live_p = frame.pressures[i];
+            float live_p = eff_live_p[i];
             float eff_p = live_p;
             if (is_latched && _has_latched_snapshot) {
                 // Properly scales live touch on top of latched baseline
@@ -267,6 +285,13 @@ public:
         for (size_t i = 0; i < kPhysicalNodes; ++i) {
             air_body += frame.proximities[i] * 0.035f;
         }
+        if (air_body > 0.005f) {
+            _crackle_seed ^= _crackle_seed << 13;
+            _crackle_seed ^= _crackle_seed >> 17;
+            _crackle_seed ^= _crackle_seed << 5;
+            float ac_flutter = ((static_cast<float>(_crackle_seed & 0xFF) / 255.0f) * 0.12f - 0.06f) * air_body;
+            air_body = std::max(0.0f, air_body + ac_flutter);
+        }
         _pressures[NodeBody] = std::min(1.0f, body_p + air_body);
 
         // Current draw onto power supply: multi-touch draws real galvanic current through the starved supply
@@ -311,16 +336,25 @@ public:
     float DynamicMotion() const { return _dynamic_motion; }
     float DigitalMotionRatio() const { return _digital_motion_ratio; }
 
+    inline float PressureLive(size_t i) const {
+        return (i < kPhysicalNodes && _live_pressures[i] > tuning::kTouchThreshold) ? _live_pressures[i] : 0.0f;
+    }
+    inline uint8_t LiveTouchedCount() const { return _live_touched; }
+    inline bool HasLatchedSnapshot() const { return _has_latched_snapshot; }
+    inline float LatchedPressure(size_t i) const { return (i < kPhysicalNodes) ? _latched_pressures[i] : 0.0f; }
+
 private:
     bool _has_latched_bridges{false};
     float _pressures[kSolverNodes]{0.0f};
     float _latched_pressures[kSolverNodes]{0.0f};
+    float _live_pressures[kPhysicalNodes]{0.0f};
     float _conductance[kSolverNodes][kSolverNodes]{{0.0f}};
     float _latched_conductance[kSolverNodes][kSolverNodes]{{0.0f}};
 
     ActiveBridge _active_bridges[kMaxActiveBridges];
     uint8_t      _num_active_bridges{0};
     uint8_t      _num_active_nodes{0};
+    uint8_t      _live_touched{0};
     int8_t       _alone_node{-1};
     float        _total_current_load{0.0f};
     float        _dynamic_motion{0.0f};
@@ -331,6 +365,7 @@ private:
     bool     _was_touching_in_latch{false};
 
     float    _prev_pressures[kPhysicalNodes]{0.0f};
+    float    _sweat_drift[kPhysicalNodes]{0.0f};
     uint32_t _crackle_seed{0x9E3779B9u};
 };
 

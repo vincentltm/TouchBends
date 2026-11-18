@@ -97,16 +97,10 @@ public:
 
         _target_gain = _eff_gain;
         _target_cross = _cross_inv;
-        _target_alpha = _alpha;
-        _target_alpha_r = _alpha_r;
-        _target_alpha_hp = _alpha_hp;
 
         constexpr float kRampStep = 1.0f / 64.0f;
         _inc_gain = (_target_gain - _smooth_gain) * kRampStep;
         _inc_cross = (_target_cross - _smooth_cross) * kRampStep;
-        _inc_alpha = (_target_alpha - _smooth_alpha) * kRampStep;
-        _inc_alpha_r = (_target_alpha_r - _smooth_alpha_r) * kRampStep;
-        _inc_alpha_hp = (_target_alpha_hp - _smooth_alpha_hp) * kRampStep;
     }
 
     __attribute__((always_inline)) inline Stereo Process(Stereo wet,
@@ -116,19 +110,16 @@ public:
                                                          float in_env = 0.0f) {
         // Per-sample parameter interpolation
         _smooth_cross += _inc_cross;
-        _smooth_alpha += _inc_alpha;
-        _smooth_alpha_r += _inc_alpha_r;
-        _smooth_alpha_hp += _inc_alpha_hp;
 
         // 1. Asymmetric Bipolar Tone Filter Network (1-pole Low-Pass + 1-pole High-Pass)
         // Subtle L/R damping divergence mimics physical room reflection acoustic absorption
-        _damp.l += _smooth_alpha * (wet.l - _damp.l);
-        _damp.r += _smooth_alpha_r * (wet.r - _damp.r);
+        _damp.l += _alpha * (wet.l - _damp.l);
+        _damp.r += _alpha_r * (wet.r - _damp.r);
 
         Stereo toned = _damp;
-        if (_smooth_alpha_hp > 0.0005f) {
-            _hp.l += _smooth_alpha_hp * (_damp.l - _hp.l);
-            _hp.r += _smooth_alpha_hp * (_damp.r - _hp.r);
+        if (_alpha_hp > 0.0005f) {
+            _hp.l += _alpha_hp * (_damp.l - _hp.l);
+            _hp.r += _alpha_hp * (_damp.r - _hp.r);
             toned.l = _damp.l - _hp.l;
             toned.r = _damp.r - _hp.r;
         } else {

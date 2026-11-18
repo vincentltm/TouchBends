@@ -2,6 +2,8 @@
 
 A reference guide to the architecture, circuit simulation, and bend connections in TouchBends.
 
+[![TouchBends Video Manual](https://img.youtube.com/vi/HYf-jqImdlk/maxresdefault.jpg)](https://youtu.be/HYf-jqImdlk)
+
 ---
 
 ## 1. System Architecture
@@ -96,7 +98,7 @@ Master routing rules are defined in `src/bends/table.h` and compiled at 750 Hz b
 | **RST + DLY** | Read Reset | Instantly snaps the playback head to the current write position. | `RestartController` in `src/bends/delay_bends.h` |
 | **RST + FBK** | Subdivision Jump | Jumps delay time across musical divisions (1/4, 1/2, 3/4, 1x, 2x). | `BufferJumpController` in `src/bends/delay_bends.h` |
 | **RST + GND** | Flush Buffer | Wipes the entire delay memory clean. | `src/app/instrument.h` |
-| **OSC + CLK** | Pitch Vibrato & Chorus | Modulates delay clock for vibrato, tape chorus, and audio-rate FM. | `src/graph/signal_graph.h` |
+| **OSC + CLK** | Pitch Vibrato & Chorus | Modulates delay clock for vibrato, analog chorus, and audio-rate FM. | `src/graph/signal_graph.h` |
 | **OSC + DLY** | Delay Time Mod | Granular scrub (Saw), time sweep (Sin), and S&H tap hop (Rnd). | `src/graph/signal_graph.h` |
 
 ### Oscillator & Filter
@@ -144,6 +146,17 @@ Master routing rules are defined in `src/bends/table.h` and compiled at 750 Hz b
 | **IN + AMP** | Contact Mic Boost | Boosts input gain up to 32x, turning the IN pad into a sensitive acoustic contact mic. | `src/parts/contact_mic.h`, `src/parts/preamp.h` |
 | **OUT + AMP** | Pumping Loop | Output volume modulates preamp bias for compression and ducking. | `src/graph/signal_graph.h` |
 | **OUT + FBK** | Larsen Howl | Simulates physical acoustic feedback howl through a tuned bandpass filter. | `src/delay/feedback_path.h` |
+| **DLY + OUT** | Stereo Decoupling | Decouples left and right delay read heads for wide spatial stereo expansion. | `src/bends/delay_bends.h` |
+| **DLY + IN** | Ping-Pong Delay | Alternating crossfeed echoes bounce between left and right channels. | `src/bends/delay_bends.h` |
+| **CLK + MIX** | Clock Swing | Injects groove swing and syncopated timing into delay clock pulses. | `src/parts/clock.h` |
+| **AMP + RST** | Preamp Dropout | Saturated preamp spikes into reset bus cause strobe dropouts and micro-loop jumps. | `src/bends/delay_bends.h` |
+| **IN + RST** | Acoustic Retrigger | Tapping the acoustic contact mic snaps delay read head to live write head. | `src/bends/delay_bends.h` |
+| **OUT + RST** | Audio Clock Hold | Output audio peaks spike reset line to pause clock counter, releasing on quiet downbeats. | `src/parts/clock.h` |
+| **IN + MIX** | Tactile Bypass | Injects acoustic contact mic directly into master mixer. | `src/parts/mixer.h` |
+| **MIX + OUT** | Master Drive | Overdrives output stage into thick analog saturation. | `src/parts/mixer.h` |
+| **GND + IN** | Mic Ground Choke | Grounds the acoustic contact mic, muting tactile pickup. | `src/parts/preamp.h` |
+| **IN + VCC** | Rail Bias Boost | High-voltage rail bias on contact mic boosts sensitivity up to 32x with crisp scratch transients. | `src/parts/contact_mic.h` |
+| **OUT + VCC** | Rail Feedback Sag | Master audio output into power rail creates dynamic rail sag and runaway saturation pumping. | `src/delay/delay_engine.h` |
 
 ### Multi-Pad Combinations (3+ Pads)
 Higher-level multi-touch interactions are analyzed in `src/circuit/topology.h`:

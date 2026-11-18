@@ -65,6 +65,24 @@ struct NodeTable {
         1.0f / 8.00f
     }};
 
+    // Physical intrinsic capacitance per node (normalized relative to dt = 1/750s)
+    // Determines RC ballistics: low capacitance = fast agile snap, high capacitance = smooth analog glide
+    static constexpr std::array<float, kSolverNodes> NodeCapacitance = {{
+        0.14f, // P00: MIX - Summing junction (moderate)
+        0.06f, // P01: RST - Logic reset line (agile)
+        0.04f, // P02: CLK - Timing core (fast, agile jitter response)
+        0.06f, // P03: OSC - Active oscillator driver (fast)
+        0.42f, // P04: FLT - Filter cutoff integrator (smooth analog portamento/slew)
+        0.01f, // P05: GND - Ground plane 0V reference
+        0.18f, // P06: DLY - Delay CV / read head (smooth read-head drift)
+        0.80f, // P07: VCC - Power supply reservoir decoupling (high inertia)
+        0.45f, // P08: AMP - Preamp input decoupling (organic bias recovery)
+        0.16f, // P09: FBK - Feedback loop return (moderate)
+        0.08f, // P10: IN  - Audio input probe (agile)
+        0.08f, // P11: OUT - Audio output probe (agile)
+        0.50f  // P12: BODY- Stray skin/hand capacitive field (high)
+    }};
+
     struct Point2D {
         float x;
         float y;
